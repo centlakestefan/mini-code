@@ -1,0 +1,577 @@
+#include "openai.h"
+
+#include <algorithm>
+#include <chrono>
+#include <iostream>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+
+#include "ai/log.h"
+
+using json = nlohmann::json;
+
+namespace {
+
+/// <summary>Reasoning-capable models served via OpenAI-compatible adapters
+/// (llama.cpp, vLLM, sglang with the deepseek/qwen reasoning template, etc.)
+/// split chain-of-thought into a separate `reasoning_content` field on the
+/// assistant message. Returns that field as a string when present and
+/// non-empty, otherwise an empty string.</summary>
+std::string extractReasoning(const json& message) {
+    if (!message.contains("reasoning_content") || message["reasoning_content"].is_null()) {
+        return "";
+    }
+    if (!message["reasoning_content"].is_string()) {
+        return "";
+    }
+    return message["reasoning_content"].get<std::string>();
+}
+
+/// <summary>Strip Harmony / channel-style special tokens from user-visible
+/// content. When the inference server runs with `--reasoning-format none` (or
+/// without a matching extractor for the model's chat template), tokens such
+/// as `<|channel|>analysis<|message|>...<|end|>` leak into `content`
+/// instead of being routed to `reasoning_content`. This is a defensive scrub;
+/// the server-side extractor remains the correct fix when it works.</summary>
+std::string stripChannelTokens(std::string text) {
+    if (text.empty()) return text;
+
+    // Drop reasoning channels entirely (analysis/thought blocks), up to the
+    // next <|end|>, the next channel opening, or end of string. \|? makes the
+    // pipe optional so we tolerate mangled variants like <channel>thought<message>.
+    static const std::regex reasoningBlock(
+        R"(<\|?channel\|?>\s*(?:analysis|thought)\s*<\|?message\|?>[\s\S]*?(?=<\|?end\|?>|<\|?channel\|?>|$))",
+        std::regex::ECMAScript | std::regex::icase
+    );
+    text = std::regex_replace(text, reasoningBlock, "");
+
+    // Strip stray channel/message/end and start-of-message markers that
+    // remain (e.g. the wrappers around the `final` channel content).
+    static const std::regex strayTokens(
+        R"(<\|?(?:channel|message|end|start|im_start|im_end)\|?>)",
+        std::regex::ECMAScript | std::regex::icase
+    );
+    text = std::regex_replace(text, strayTokens, "");
+
+    // Trim leading/trailing whitespace left behind by the strips.
+    auto first = text.find_first_not_of(" \t\r\n");
+    auto last  = text.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    return text.substr(first, last - first + 1);
+}
+
+/// <summary>Returns the user-visible `content` of an assistant message, or an
+/// empty string when absent/null/non-string. Strips Harmony channel tokens
+/// (see stripChannelTokens) so callers don't have to.</summary>
+std::string extractContent(const json& message) {
+    if (!message.contains("content") || message["content"].is_null()) {
+        return "";
+    }
+    if (!message["content"].is_string()) {
+        return "";
+    }
+    return stripChannelTokens(message["content"].get<std::string>());
+}
+
+/// <summary>Strip per-turn-only fields from an assistant message before
+/// echoing it back to the server in conversation history. `reasoning_content`
+/// is chain-of-thought scratch that some providers (DeepSeek's hosted API)
+/// reject when sent back, and all providers waste tokens reading it.</summary>
+json historyMessage(json message) {
+    message.erase("reasoning_content");
+    return message;
+}
+
+} // namespace
+
+OpenAIClient::OpenAIClient(const AiConfig* config, const std::string& url, const std::string& model, const std::string& apiKey)
+    : m_config(config), m_model(model), m_apiKeyRef(apiKey) {
+    m_url = url;
+
+    Log::instance().write("OpenAIClient initialized with url=" + m_url + "\n");
+}
+
+/// <summary>Initializes the persistent client with proper timeout and keep-alive settings.</summary>
+void OpenAIClient::init_api_client() {
+    Log::instance().write("Initializing API client connection to " + m_url + "\n");
+
+    m_api_client = std::make_unique<httplib::Client>(m_url);
+
+    m_api_client->set_connection_timeout(m_config->openaiConnectionTimeoutSeconds());
+    m_api_client->set_read_timeout(m_config->openaiReadTimeoutSeconds());
+    m_api_client->set_keep_alive(true);
+
+    Log::instance().write("API client initialized with keep-alive enabled\n");
+}
+
+/// <summary>Returns the configured OpenAI API key.</summary>
+std::string OpenAIClient::getApiKey() {
+    if (!m_apiKeyRef.empty()) {
+        return m_apiKeyRef;
+    }
+    throw std::runtime_error("OpenAI API key is not set");
+}
+
+/// <summary>Makes API call to OpenAI with retry logic.</summary>
+json OpenAIClient::call_openai(const std::string& user_message, const json& tools, const json& conversation_history) {
+    // Build messages array
+    json messages = json::array();
+
+    // Add system message first (OpenAI puts system as first message)
+    if (!m_systemPrompt.empty()) {
+        messages.push_back({
+            {"role", "system"},
+            {"content", m_systemPrompt}
+        });
+    }
+
+    // Add conversation history
+    for (const auto& msg : conversation_history) {
+        messages.push_back(msg);
+    }
+
+    // Add new user message if provided
+    if (!user_message.empty()) {
+        messages.push_back({
+            {"role", "user"},
+            {"content", user_message}
+        });
+    }
+
+    // Build request body
+    json request_body = {
+        {"model", m_model},
+        {"max_tokens", m_config->maxOutputTokens()},
+        {"messages", messages}
+    };
+
+    // Add tools if provided
+    if (!tools.empty()) {
+        request_body["tools"] = tools;
+        request_body["tool_choice"] = "auto";
+    }
+
+    // Provider-level extended-thinking override. OpenAI-compatible servers
+    // that support a thinking toggle (Qwen3, GLM-4.5, etc.) read it from
+    // chat_template_kwargs.enable_thinking. The toggle is boolean — the
+    // numeric budget has no place in this protocol, so any value > 0 just
+    // means "on".
+    if (m_thinkingBudget.has_value()) {
+        request_body["chat_template_kwargs"] = {
+            {"enable_thinking", m_thinkingBudget.value() > 0}
+        };
+    }
+
+    std::string api_key = getApiKey();
+
+    // Set headers
+    httplib::Headers headers = {
+        {"Authorization", "Bearer " + api_key},
+        {"Content-Type", "application/json"}
+    };
+
+    int connection_retry_count = 0;
+    int rate_limit_retries = 0;
+    int server_error_retries = 0;
+
+    for (;;) {
+        auto res = m_api_client->Post("/v1/chat/completions", headers, request_body.dump(), "application/json");
+
+        // Handle connection errors
+        if (!res) {
+            auto error = res.error();
+            std::string error_msg = httplib::to_string(error);
+
+            std::ostringstream log_msg;
+            log_msg << "Connection failed (attempt " << (connection_retry_count + 1)
+                   << "/" << MAX_CONNECTION_RETRIES << "): " << error_msg << "\n";
+            Log::instance().write(log_msg.str());
+
+            // Check if we should retry
+            if (connection_retry_count >= MAX_CONNECTION_RETRIES) {
+                Log::instance().write("Exceeded maximum connection retries\n");
+                std::ostringstream exception_msg;
+                exception_msg << "Connection failed after " << MAX_CONNECTION_RETRIES
+                            << " retries: " << error_msg;
+                throw std::runtime_error(exception_msg.str());
+            }
+
+            connection_retry_count++;
+
+            // Reinitialize connection on connection failure
+            Log::instance().write("Reinitializing API client connection...\n");
+            init_api_client();
+
+            // Exponential backoff for connection retries: 2, 4, 8, 16, 32 seconds
+            int wait_seconds = std::min(CONNECTION_BACKOFF_BASE * (1 << (connection_retry_count - 1)), CONNECTION_BACKOFF_MAX);
+
+            std::ostringstream retry_msg;
+            retry_msg << "Retrying in " << wait_seconds << " seconds...\n";
+            Log::instance().write(retry_msg.str());
+
+            std::this_thread::sleep_for(std::chrono::seconds(wait_seconds));
+            continue;
+        }
+
+        // Reset connection retry counter on successful connection
+        connection_retry_count = 0;
+
+        // Handle HTTP status codes
+        int status = res->status;
+
+        // Success
+        if (status == 200) {
+            return json::parse(res->body);
+        }
+
+        // Rate limiting (429)
+        if (status == 429) {
+            if (rate_limit_retries >= MAX_RATE_LIMIT_RETRIES) {
+                std::ostringstream err;
+                err << "Exceeded maximum rate limit retries (" << MAX_RATE_LIMIT_RETRIES << ")\n";
+                Log::instance().write(err.str());
+                throw std::runtime_error("Exceeded maximum rate limit retries");
+            }
+            rate_limit_retries++;
+
+            int wait_seconds = 0;
+
+            // Try to parse retry-after header with error handling
+            if (res->has_header("retry-after")) {
+                try {
+                    wait_seconds = std::stoi(res->get_header_value("retry-after"));
+                }
+                catch (const std::exception& e) {
+                    std::ostringstream err;
+                    err << "Failed to parse retry-after header: " << e.what() << "\n";
+                    Log::instance().write(err.str());
+                    wait_seconds = 0;
+                }
+            }
+
+            // Use exponential backoff if no valid retry-after header
+            if (wait_seconds <= 0) {
+                // Exponential backoff: 5, 10, 20, 40, 80, 160 seconds (capped at 300)
+                wait_seconds = std::min(RATE_LIMIT_BACKOFF_BASE * (1 << (rate_limit_retries - 1)), RATE_LIMIT_BACKOFF_MAX);
+            }
+
+            std::ostringstream log_msg;
+            log_msg << "Rate limited (attempt " << rate_limit_retries << "/" << MAX_RATE_LIMIT_RETRIES
+                   << "). Waiting " << wait_seconds << " seconds before retry\n";
+            Log::instance().write(log_msg.str());
+
+            std::this_thread::sleep_for(std::chrono::seconds(wait_seconds));
+            continue;
+        }
+
+        // Client errors (4xx) - generally not retryable
+        if (status >= 400 && status < 500) {
+            std::string error_detail = res->body.length() > 500 ? res->body.substr(0, 500) + "..." : res->body;
+            std::ostringstream log_msg;
+            log_msg << "Client error " << status << ": " << error_detail << "\n";
+            Log::instance().write(log_msg.str());
+
+            std::ostringstream exception_msg;
+            switch (status) {
+            case 400:
+                exception_msg << "Bad Request (400): Invalid request format or parameters - " << error_detail;
+                break;
+            case 401:
+                exception_msg << "Unauthorized (401): Invalid or missing API key - " << error_detail;
+                break;
+            case 403:
+                exception_msg << "Forbidden (403): Access denied - " << error_detail;
+                break;
+            case 404:
+                exception_msg << "Not Found (404): Endpoint not found - " << error_detail;
+                break;
+            default:
+                exception_msg << "Client error (" << status << "): " << error_detail;
+                break;
+            }
+            throw std::runtime_error(exception_msg.str());
+        }
+
+        // Server errors (5xx) - can be retried
+        if (status >= 500 && status < 600) {
+            if (server_error_retries >= MAX_SERVER_ERROR_RETRIES) {
+                std::string error_detail = res->body.length() > 500 ? res->body.substr(0, 500) + "..." : res->body;
+                std::ostringstream err;
+                err << "Exceeded maximum server error retries (" << MAX_SERVER_ERROR_RETRIES << ")\n";
+                Log::instance().write(err.str());
+
+                std::ostringstream exception_msg;
+                exception_msg << "Server error (" << status << ") after "
+                            << MAX_SERVER_ERROR_RETRIES << " retries: " << error_detail;
+                throw std::runtime_error(exception_msg.str());
+            }
+            server_error_retries++;
+
+            int wait_seconds = 0;
+
+            // For 503 Service Unavailable, respect retry-after header
+            if (status == 503 && res->has_header("retry-after")) {
+                try {
+                    wait_seconds = std::stoi(res->get_header_value("retry-after"));
+                }
+                catch (const std::exception& e) {
+                    std::ostringstream err;
+                    err << "Failed to parse retry-after header: " << e.what() << "\n";
+                    Log::instance().write(err.str());
+                    wait_seconds = 0;
+                }
+            }
+
+            // Use exponential backoff if no retry-after header
+            if (wait_seconds <= 0) {
+                // Exponential backoff: 5, 10, 20, 40, 80 seconds (capped at 120)
+                wait_seconds = std::min(SERVER_ERROR_BACKOFF_BASE * (1 << (server_error_retries - 1)), SERVER_ERROR_BACKOFF_MAX);
+            }
+
+            std::string error_msg;
+            switch (status) {
+            case 500: error_msg = "Internal Server Error"; break;
+            case 502: error_msg = "Bad Gateway"; break;
+            case 503: error_msg = "Service Unavailable"; break;
+            case 504: error_msg = "Gateway Timeout"; break;
+            default: error_msg = "Server Error"; break;
+            }
+
+            std::ostringstream log_msg;
+            log_msg << error_msg << " (" << status << ") - attempt "
+                   << server_error_retries << "/" << MAX_SERVER_ERROR_RETRIES
+                   << ". Retrying in " << wait_seconds << " seconds\n";
+            Log::instance().write(log_msg.str());
+
+            std::this_thread::sleep_for(std::chrono::seconds(wait_seconds));
+            continue;
+        }
+
+        // Unknown status code
+        std::string error_detail = res->body.length() > 500 ? res->body.substr(0, 500) + "..." : res->body;
+        Log::instance().write("Unexpected HTTP status " + std::to_string(status) + ": " + error_detail + "\n");
+        throw std::runtime_error("Unexpected HTTP status " + std::to_string(status) + ": " + error_detail);
+    }
+}
+
+/// <summary>Sends one user message and returns OpenAI's text reply, running any
+/// tools the model calls along the way.</summary>
+std::string OpenAIClient::chat(Context& context, const std::string& user_message) {
+
+    m_tool_registry.clear();
+    m_tools.clear();
+
+    // Wrap all tools to bind the context
+    for (const auto& tool : context.tools) {
+        auto executor = tool.executor;
+        m_tool_registry[tool.name] = [executor, &context](const json& input) {
+            return executor(context, input);
+        };
+        m_tools.push_back(tool);
+    }
+
+    Log::instance().write("Start " + user_message + " ===\n");
+
+    // Same-line progress feedback while the model works through tool calls.
+    bool printed_status = false;
+    auto show_tool = [&](const std::string& name, const json& input) {
+        constexpr size_t W = 78;
+        std::string s = "[tool] " + getToolDisplayName(name, input);
+        if (s.size() > W) s = s.substr(0, W - 3) + "...";
+        else s.append(W - s.size(), ' ');
+        std::cout << "\r" << s << std::flush;
+        printed_status = true;
+    };
+
+    // Convert tools to OpenAI format
+    json tools = json::array();
+    for (const auto& tool_spec : m_tools) {
+        json tool_def = tool_definition_to_json(tool_spec, ToolFormat::OpenAI);
+
+        // OpenAI expects tools in a specific format with "type": "function"
+        json openai_tool = {
+            {"type", "function"},
+            {"function", tool_def}
+        };
+
+        tools.push_back(openai_tool);
+    }
+
+    int iteration = 0;
+    const int max_iterations = m_config->maxToolIterations();
+
+    if (!m_api_client) init_api_client();
+
+    // Add the user message to persistent history.
+    if (!user_message.empty()) {
+        m_conversation_history.push_back({
+            {"role", "user"},
+            {"content", user_message}
+        });
+    }
+
+    json response = call_openai("", tools, m_conversation_history);
+    if (!response.contains("choices") || response["choices"].empty()) {
+        throw std::runtime_error("Invalid OpenAI response: " + response.dump());
+    }
+
+    auto choice = response["choices"][0];
+    auto message = choice["message"];
+    m_conversation_history.push_back(historyMessage(message));
+
+    // Tool loop: keep going while the model requests tools. Terminates as soon
+    // as the model replies without tool_calls.
+    while (message.contains("tool_calls") && !message["tool_calls"].empty() && iteration < max_iterations) {
+        iteration++;
+        Log::instance().write("=== Iteration " + std::to_string(iteration) + " ===\n");
+
+        {
+            std::string cot = extractReasoning(message);
+            if (!cot.empty()) {
+                Log::instance().write("Assistant CoT: " + cot + "\n");
+            }
+        }
+        {
+            std::string text = extractContent(message);
+            if (!text.empty()) {
+                Log::instance().write("Assistant text: " + text + "\n");
+            }
+        }
+
+        // Process each tool call
+        for (const auto& tool_call : message["tool_calls"]) {
+            std::string tool_id = tool_call["id"];
+            std::string tool_name = tool_call["function"]["name"];
+
+            json tool_input;
+            std::string result;
+            bool args_parsed = false;
+            try {
+                tool_input = json::parse(tool_call["function"]["arguments"].get<std::string>());
+                args_parsed = true;
+            }
+            catch (const std::exception& e) {
+                std::string raw_args;
+                try {
+                    raw_args = tool_call["function"]["arguments"].get<std::string>();
+                }
+                catch (...) {
+                    raw_args = tool_call["function"]["arguments"].dump();
+                }
+                result = "ERROR: Tool call arguments are not valid JSON: " + std::string(e.what()) +
+                        "\nReceived arguments: " + raw_args +
+                        "\nPlease retry this tool call with a valid JSON object as the arguments.";
+                Log::instance().write("Tool argument parse failure for '" + tool_name + "': " + e.what() + "\n");
+            }
+
+            if (!args_parsed) {
+                m_conversation_history.push_back({
+                    {"role", "tool"},
+                    {"tool_call_id", tool_id},
+                    {"content", result}
+                });
+                continue;
+            }
+
+            show_tool(tool_name, tool_input);
+            Log::instance().write("Executing tool: " + tool_name + "\n");
+            Log::instance().write("Input: " + tool_input.dump(2) + "\n");
+
+            auto it = m_tool_registry.find(tool_name);
+            if (it != m_tool_registry.end()) {
+                try {
+                    result = it->second(tool_input);
+                }
+                catch (const std::exception& e) {
+                    result = "ERROR: Tool execution failed: " + std::string(e.what());
+                    Log::instance().write("Tool execution exception: " + std::string(e.what()) + "\n");
+                }
+            }
+            else {
+                result = formatUnknownToolError(tool_name, m_tool_registry);
+                Log::instance().write("Unknown tool requested: " + tool_name + "\n");
+            }
+
+            m_conversation_history.push_back({
+                {"role", "tool"},
+                {"tool_call_id", tool_id},
+                {"content", result}
+            });
+        }
+
+        response = call_openai("", tools, m_conversation_history);
+        if (!response.contains("choices") || response["choices"].empty()) {
+            throw std::runtime_error("Invalid OpenAI response: " + response.dump());
+        }
+
+        choice = response["choices"][0];
+        message = choice["message"];
+        m_conversation_history.push_back(historyMessage(message));
+    }
+
+    if (iteration >= max_iterations) {
+        Log::instance().write("Warning: Reached maximum iterations\n");
+    }
+
+    Log::instance().write("=== Final Response === " + choice.value("finish_reason", "unknown") + "\n");
+
+    // Clear the progress line before the reply is printed.
+    if (printed_status) std::cout << "\r" << std::string(78, ' ') << "\r" << std::flush;
+
+    // Collect the assistant's final text reply (falling back to reasoning
+    // content for reasoning models that emit only that).
+    std::string reply = extractContent(message);
+    if (reply.empty()) {
+        reply = extractReasoning(message);
+    }
+    return reply;
+}
+
+/// <summary>Starts a new conversation by clearing the conversation history.</summary>
+void OpenAIClient::start() {
+    m_conversation_history = json::array();
+    Log::instance().write("Started new conversation (history cleared)\n");
+}
+
+/// <summary>Checks if conversation history exists.</summary>
+bool OpenAIClient::hasHistory() const {
+    return !m_conversation_history.empty();
+}
+
+/// <summary>Loads conversation history from stored format.</summary>
+void OpenAIClient::loadHistory(const json& history) {
+    if (!history.is_array()) {
+        Log::instance().write("ERROR: Invalid history format - expected array\n");
+        return;
+    }
+
+    m_conversation_history = history;
+    Log::instance().write("Loaded conversation history with " + std::to_string(history.size()) + " messages\n");
+}
+
+/// <summary>Gets the current conversation history.</summary>
+json OpenAIClient::getHistory() const {
+    return m_conversation_history;
+}
+
+/// <summary>Sets the model for OpenAI client.</summary>
+void OpenAIClient::setModel(const std::string& model) {
+    m_model = model;
+    Log::instance().write("OpenAIClient model updated to: " + model + "\n");
+}
+
+/// <summary>Sets the host URL for OpenAI client and resets the API client.</summary>
+void OpenAIClient::setHost(const std::string& host) {
+    m_url = host;
+    m_api_client.reset();  // Reset client to force re-initialization with new URL
+    Log::instance().write("OpenAIClient host updated to: " + host + " (API client reset)\n");
+}
+
+/// <summary>Sets the API key for OpenAI client.</summary>
+void OpenAIClient::setApiKeyRef(const std::string& apiKey) {
+    m_apiKeyRef = apiKey;
+    Log::instance().write("OpenAIClient API key updated\n");
+}
