@@ -33,9 +33,19 @@ cmake-configure = cmake -S . -B build
 cmake-build = cmake --build build
 ctest = ctest --test-dir build --output-on-failure
 
-# --- Bazel ---
-bazel-build = bazel build //...
-bazel-test = bazel test //...
+# --- Make / NMake (default target) ---
+make = make
+nmake = nmake
+
+# --- Bazel (the target is data: e.g. //app:server, or //... for all) ---
+bazel-build = bazel build %1
+bazel-test = bazel test %1
+
+# --- Java (fixed phases; pick the name, not the goal) ---
+mvn-build = mvn package
+mvn-test = mvn test
+mvn-verify = mvn verify
+ant = ant
 
 # --- Cargo / Go / Python ---
 cargo-build = cargo build
@@ -43,3 +53,4 @@ cargo-test = cargo test
 go-build = go build ./...
 go-test = go test ./...
 py-test = python -m pytest
+py-lint = ruff check .
