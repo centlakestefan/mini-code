@@ -24,25 +24,46 @@ fs::path system_store_path(const std::string& filename) {
 #endif
 }
 
-fs::path global_store_path(const std::string& filename) {
+fs::path home_dir() {
 #ifdef _WIN32
     fs::path home = env_path("USERPROFILE");
     if (home.empty()) home = env_path("HOMEDRIVE") / env_path("HOMEPATH");
 #else
     fs::path home = env_path("HOME");
 #endif
-    return home / ".minicode" / filename;
+    return home;
 }
 
+fs::path global_store_path(const std::string& filename) {
+    return home_dir() / ".minicode" / filename;
+}
+
+// Encode an absolute directory path into a single filename-safe key.
+std::string project_key(const fs::path& dir) {
+    std::string key;
+    for (char c : dir.string()) {
+        key += (c == '\\' || c == '/' || c == ':') ? '_' : c;
+    }
+    size_t start = key.find_first_not_of('_');
+    key = (start == std::string::npos) ? std::string("root") : key.substr(start);
+    return key;
+}
+
+// The project (local) scope is stored centrally per working directory under the
+// user's home, NOT inside the project folder. This means a cloned repo can't
+// ship config/commands to the agent, and nothing is ever written into the
+// project tree (so no .gitignore entry is needed). Keyed by the canonical
+// absolute path of the current directory.
 fs::path local_path(const std::string& filename) {
     std::error_code ec;
-    fs::path dir = fs::current_path(ec);
-    if (ec) dir = ".";
-    return dir / ".minicode" / filename;
+    fs::path cwd = fs::current_path(ec);
+    if (ec) cwd = ".";
+    fs::path canon = fs::weakly_canonical(cwd, ec);
+    if (ec) canon = cwd;
+    return home_dir() / ".minicode" / "projects" / project_key(canon) / filename;
 }
 
 // Resolve the path to a named store file ("config", "commands", ...) for a scope.
-// Local is always the current directory's ".minicode/<file>" (no upward search).
 fs::path store_path(Level level, const std::string& filename) {
     switch (level) {
         case Level::System: return system_store_path(filename);

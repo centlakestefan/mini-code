@@ -12,10 +12,11 @@ const char* level_name(Level level);
 
 // Resolve the config file path for a scope.
 //
-// System and Global are fixed per-machine / per-user. Local is always
-// "./.minicode/config" in the current directory — there is no upward search:
-// the working directory is the sandbox, and (unlike git, which has `git init`
-// to mark a root) mini-code has no project boundary to walk up to.
+// System and Global are fixed per-machine / per-user. Local (project) scope is
+// stored centrally per working directory under the user's home
+// (~/.minicode/projects/<encoded-cwd>/config), NOT inside the project folder —
+// so a cloned repo can't ship config/commands and nothing is written into the
+// project tree. No upward search.
 std::filesystem::path config_path(Level level);
 
 // Same resolution as config_path, but for the allow-listed commands store

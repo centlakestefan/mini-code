@@ -17,5 +17,6 @@ Makefile
 .vscode/
 .idea/
 
-# Local config created while testing
+# Local store is now central (~/.minicode/projects); kept as a safety net so a
+# stray or legacy ./.minicode is never committed.
 .minicode/

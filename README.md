@@ -40,16 +40,21 @@ Three scopes, in increasing order of precedence:
 | -------- | ---------- | ---------------------------------------------------- |
 | system   | `--system` | `%PROGRAMDATA%\minicode\config` / `/etc/minicode/config` |
 | global   | `--global` | `~/.minicode/config` (user home)                     |
-| local    | `--local`  | `./.minicode/config` in the current directory        |
+| local    | `--local`  | per-folder, stored centrally at `~/.minicode/projects/<folder>/config` |
 
 When reading, **local overrides global overrides system**. Writes default to
 the **local** scope; pass `--global` or `--system` to target another scope.
+
+Local (project) settings are stored **centrally**, keyed by the working
+directory, under `~/.minicode/projects/` — not inside the project folder. So
+nothing is written into your repo, and cloning a repo can't bring its own config
+or runnable commands with it.
 
 ### Examples
 
 ```sh
 mini-code --global config set api-key sk_ant_xx23982932
-mini-code config set editor vim          # writes to ./.minicode/config
+mini-code config set editor vim          # writes to this folder's local config
 mini-code config get api-key             # effective value across scopes
 mini-code config list                    # all effective values
 mini-code config list --show-origin      # prefix each entry with its scope
@@ -127,7 +132,9 @@ commands you explicitly allow-list, so its reach is whatever you configure.)
 
 `run_command` is **not** a general shell — the agent can only run commands you
 have explicitly allow-listed. Commands are stored per scope (system / global /
-local, same precedence as config) in a `.minicode/commands` file, managed with:
+local, same precedence as config); local commands live in the central
+per-folder store (not in the repo), so a cloned project can't ship runnable
+commands. Managed with:
 
 ```sh
 mini-code command add build-debug cmake --build build --config Debug
