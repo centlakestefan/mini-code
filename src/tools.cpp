@@ -199,11 +199,27 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
                 }
             }
 
+            // Cap the rendered output so a single huge file can't blow the
+            // context window / cost (in line with find_files and run_command).
+            constexpr size_t kMaxViewBytes = 64000;
             std::ostringstream out;
+            size_t emitted = 0;
+            bool truncated = false;
             for (int i = start - 1; i < end && i < static_cast<int>(lines.size()); ++i) {
-                out << (i + 1) << "|" << lines[i] << "\n";
+                std::string row = std::to_string(i + 1) + "|" + lines[i] + "\n";
+                if (emitted + row.size() > kMaxViewBytes) {
+                    truncated = true;
+                    break;
+                }
+                out << row;
+                emitted += row.size();
             }
-            return out.str();
+            std::string result = out.str();
+            if (truncated) {
+                result += "... [truncated at " + std::to_string(kMaxViewBytes) +
+                          " bytes; use view_range to see more]\n";
+            }
+            return result;
         }
 
         if (command == "create") {
