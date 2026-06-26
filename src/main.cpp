@@ -290,6 +290,37 @@ std::string default_model(const std::string& provider) {
     return "";
 }
 
+const char* kDefaultSystemPrompt =
+    "You are an experienced fullstack developer in a chat with a user. "
+    "The user has started a session in a working folder. You have tools to "
+    "view and edit files in that folder, search files, and run a set of "
+    "pre-approved commands (use list_commands to see them and run_command to "
+    "run them).";
+
+// Returns the effective system prompt. If none is configured in any scope, the
+// built-in default is written so it can be edited later — preferring the
+// broadest writable scope (system, then global, then local). If no scope is
+// writable, the default is still used for this session.
+std::string ensure_system_prompt() {
+    if (auto existing = get_effective("system-prompt")) return *existing;
+
+    const std::string def = kDefaultSystemPrompt;
+    for (Level lvl : {Level::System, Level::Global, Level::Local}) {
+        try {
+            auto path = config_path(lvl, true);
+            Config cfg = Config::load(path);
+            cfg.set("system-prompt", def);
+            cfg.save(path);
+            std::cerr << "(wrote default system-prompt to " << level_name(lvl) << " config)\n";
+            return def;
+        } catch (const std::exception&) {
+            // Scope not writable (e.g. no permission for system); try the next.
+        }
+    }
+    std::cerr << "(could not persist a default system-prompt; using built-in default)\n";
+    return def;
+}
+
 int cmd_chat() {
     auto provider = get_effective("provider-type");
     if (!provider) {
@@ -324,6 +355,7 @@ int cmd_chat() {
     }
 
     client->start();
+    client->setSystemPrompt(ensure_system_prompt());
 
     // Register the file tools (editor + search) for this chat session.
     Context context;
