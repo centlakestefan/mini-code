@@ -1,4 +1,7 @@
-#include "openai.h"
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Centlake Software AB
+
+#include "minicode/openai.h"
 
 #include <algorithm>
 #include <chrono>
@@ -9,7 +12,7 @@
 #include <string>
 #include <thread>
 
-#include "ai/log.h"
+#include "minicode/ai/log.h"
 
 using json = nlohmann::json;
 

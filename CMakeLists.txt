@@ -42,11 +42,11 @@ add_executable(mini-code
   src/commands.cpp
   src/paths.cpp
   src/tools.cpp
-  claude.cpp
-  openai.cpp
-  gemini.cpp
+  src/claude.cpp
+  src/openai.cpp
+  src/gemini.cpp
 )
-target_include_directories(mini-code PRIVATE include ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mini-code PRIVATE include)
 target_compile_definitions(mini-code PRIVATE
   MINICODE_VERSION="${PROJECT_VERSION}"
   CPPHTTPLIB_OPENSSL_SUPPORT
