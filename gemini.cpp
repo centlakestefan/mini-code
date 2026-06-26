@@ -274,8 +274,8 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
         constexpr size_t W = 78;
         std::string s = "[tool] " + getToolDisplayName(name, input);
         if (s.size() > W) s = s.substr(0, W - 3) + "...";
-        else s.append(W - s.size(), ' ');
-        std::cout << "\r" << s << std::flush;
+        if (!printed_status) std::cout << "\x1b[?25l"; // hide cursor during the wait
+        std::cout << "\r" << s << "\x1b[K" << std::flush; // erase to end of line (no padding)
         printed_status = true;
     };
 
@@ -420,8 +420,8 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
 
     Log::instance().write("=== Final Response ===" + finish_reason + "\n");
 
-    // Clear the progress line before the reply is printed.
-    if (printed_status) std::cout << "\r" << std::string(78, ' ') << "\r" << std::flush;
+    // Clear the progress line and restore the cursor before the reply prints.
+    if (printed_status) std::cout << "\r\x1b[K\x1b[?25h" << std::flush;
 
     // Collect the assistant's final text reply.
     std::string reply;

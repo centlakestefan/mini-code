@@ -375,7 +375,7 @@ int cmd_chat() {
 
     std::string line;
     while (true) {
-        std::cout << "> " << std::flush;
+        std::cout << "\x1b[?25h> " << std::flush; // ensure cursor is visible at the prompt
         if (!std::getline(std::cin, line)) {
             std::cout << "\n";
             break; // EOF (Ctrl-D / Ctrl-Z)
