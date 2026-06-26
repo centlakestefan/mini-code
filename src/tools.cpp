@@ -442,47 +442,96 @@ std::vector<std::string> tokenize_template(const std::string& s) {
     return toks;
 }
 
+// Parse a placeholder at s[i] (s[i] must be '%'). Recognizes %n, %*, %pn, %p*.
+// Returns characters consumed (0 if not a placeholder). The 'p' type marks a
+// path argument; either is_star or index (1-9) is set.
+size_t parse_placeholder(const std::string& s, size_t i, bool& is_path, bool& is_star, int& index) {
+    is_path = false;
+    is_star = false;
+    index = 0;
+    size_t j = i + 1; // s[i] == '%'
+    if (j >= s.size()) return 0;
+    if (s[j] == 'p') { is_path = true; ++j; if (j >= s.size()) return 0; }
+    if (s[j] == '*') { is_star = true; return j - i + 1; }
+    if (s[j] >= '1' && s[j] <= '9') { index = s[j] - '0'; return j - i + 1; }
+    return 0;
+}
+
 bool template_has_placeholder(const std::string& tpl) {
-    for (size_t i = 0; i + 1 < tpl.size(); ++i) {
-        if (tpl[i] == '%' && (tpl[i + 1] == '*' || (tpl[i + 1] >= '1' && tpl[i + 1] <= '9'))) {
-            return true;
-        }
+    for (size_t i = 0; i < tpl.size(); ++i) {
+        if (tpl[i] != '%') continue;
+        bool p, star;
+        int idx;
+        if (parse_placeholder(tpl, i, p, star, idx) > 0) return true;
     }
     return false;
 }
 
 // Expand a template into an argv vector. The template's whitespace defines the
-// argv boundaries; %1..%9 and %* are replaced with model-supplied values as
-// *literal* argv elements (never re-split), so no shell quoting is involved.
+// argv boundaries; %n / %pn are replaced with model-supplied values as *literal*
+// argv elements (never re-split), so no shell quoting is involved. The 'p'
+// (path) type additionally requires the value to resolve inside the sandbox and
+// substitutes the resolved absolute path. %* / %p* take all remaining values.
 bool build_argv(const std::string& tpl, const std::vector<std::string>& args,
                 std::vector<std::string>& argv, std::string& error) {
-    // Highest positional placeholder used; %* expands to the args beyond it.
+    // Highest positional index used; %* expands to the args beyond it.
     int max_idx = 0;
-    for (size_t i = 0; i + 1 < tpl.size(); ++i) {
-        if (tpl[i] == '%' && tpl[i + 1] >= '1' && tpl[i + 1] <= '9') {
-            max_idx = std::max(max_idx, tpl[i + 1] - '0');
-        }
+    for (size_t i = 0; i < tpl.size(); ++i) {
+        if (tpl[i] != '%') continue;
+        bool p, star;
+        int idx;
+        if (parse_placeholder(tpl, i, p, star, idx) > 0 && !star) max_idx = std::max(max_idx, idx);
     }
 
+    auto subst_path = [&](const std::string& value, std::string& out) -> bool {
+        fs::path resolved;
+        std::string perr;
+        if (!resolve_in_sandbox(value, resolved, perr)) { error = perr; return false; }
+        out = resolved.string();
+        return true;
+    };
+
     for (const std::string& tok : tokenize_template(tpl)) {
-        if (tok == "%*") {
-            for (size_t i = static_cast<size_t>(max_idx); i < args.size(); ++i) argv.push_back(args[i]);
+        if (tok == "%*" || tok == "%p*") {
+            bool as_path = (tok == "%p*");
+            for (size_t i = static_cast<size_t>(max_idx); i < args.size(); ++i) {
+                if (as_path) {
+                    std::string r;
+                    if (!subst_path(args[i], r)) return false;
+                    argv.push_back(r);
+                } else {
+                    argv.push_back(args[i]);
+                }
+            }
             continue;
         }
+
         std::string out;
-        for (size_t i = 0; i < tok.size(); ++i) {
-            if (tok[i] == '%' && i + 1 < tok.size() && tok[i + 1] >= '1' && tok[i + 1] <= '9') {
-                size_t idx = static_cast<size_t>(tok[i + 1] - '0');
-                if (idx > args.size()) {
-                    error = "ERROR: command needs argument %" + std::to_string(idx) +
-                            " but only " + std::to_string(args.size()) + " were provided.";
-                    return false;
+        for (size_t i = 0; i < tok.size();) {
+            if (tok[i] == '%') {
+                bool is_path, is_star;
+                int index;
+                size_t consumed = parse_placeholder(tok, i, is_path, is_star, index);
+                if (consumed > 0 && !is_star) {
+                    if (static_cast<size_t>(index) > args.size()) {
+                        error = "ERROR: command needs argument %" +
+                                std::string(is_path ? "p" : "") + std::to_string(index) +
+                                " but only " + std::to_string(args.size()) + " were provided.";
+                        return false;
+                    }
+                    if (is_path) {
+                        std::string r;
+                        if (!subst_path(args[index - 1], r)) return false;
+                        out += r;
+                    } else {
+                        out += args[index - 1];
+                    }
+                    i += consumed;
+                    continue;
                 }
-                out += args[idx - 1];
-                ++i; // skip the digit
-            } else {
-                out.push_back(tok[i]);
             }
+            out.push_back(tok[i]);
+            ++i;
         }
         argv.push_back(out);
     }
@@ -748,7 +797,9 @@ std::vector<ToolSpec> builtin_tools() {
         "'mini-code command add' can be run. Call list_commands first to see what "
         "is available, including any %1, %2, ... placeholders a command takes. "
         "Provide values for those placeholders via 'args' (in order; %* receives "
-        "all remaining values). Returns the command's combined output and exit code.";
+        "all remaining values). A %p1-style placeholder is a path argument that "
+        "must stay inside the working directory. Returns the command's combined "
+        "output and exit code.";
     run.parameters = {
         {"type", "object"},
         {"properties", {

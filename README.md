@@ -147,6 +147,16 @@ or subcommand (`git commit -m %1` is fine; `git %1` lets the model choose the
 subcommand). Use `--` before a placeholder if a value might start with `-`
 (e.g. `rm -- %1`).
 
+**Path arguments (`%p1`):** a `%p`-prefixed placeholder (`%p1`..`%p9`, `%p*`)
+marks a path that must stay inside the working-directory sandbox. The value is
+resolved the same way as the file tools and the command is refused if it points
+outside (via `..`, an absolute path, or a symlink); the resolved absolute path
+is substituted.
+
+```sh
+mini-code command add fmt clang-format -i %p1   # only formats files in-tree
+```
+
 ## Other commands
 
 ```sh
