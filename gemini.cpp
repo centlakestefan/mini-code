@@ -29,6 +29,7 @@ void GeminiClient::init_api_client() {
     mclog("Initializing Gemini API client connection to " + m_url + "\n");
 
     m_api_client = std::make_unique<httplib::Client>(m_url);
+    m_api_client->enable_server_certificate_verification(true);
 
     m_api_client->set_connection_timeout(30);
     m_api_client->set_read_timeout(120);
@@ -150,7 +151,7 @@ nlohmann::json GeminiClient::call_gemini(
             }
             connection_retry_count++;
             init_api_client();
-            int wait_seconds = std::min(2 * (1 << (connection_retry_count - 1)), 32);
+            int wait_seconds = std::min(2 * (1 << std::min(connection_retry_count - 1, 16)), 32);
             std::this_thread::sleep_for(std::chrono::seconds(wait_seconds));
             continue;
         }
@@ -186,11 +187,13 @@ nlohmann::json GeminiClient::call_gemini(
                 }
             }
 
-            // Use exponential backoff if no valid retry-after header
+            // Use exponential backoff if no valid retry-after header.
             if (wait_seconds <= 0) {
-                // Exponential backoff: 5, 10, 20, 40, 80, 160 seconds (capped at 300)
-                wait_seconds = std::min(5 * (1 << (rate_limit_retries - 1)), 300);
+                wait_seconds = 5 * (1 << std::min(rate_limit_retries - 1, 16));
             }
+            // Cap whatever we got (header or backoff) so a hostile/buggy
+            // retry-after can't make us sleep indefinitely.
+            wait_seconds = std::min(wait_seconds, 300);
 
             std::ostringstream log_msg;
             log_msg << "Rate limited (attempt " << rate_limit_retries << "/" << max_rate_limit_retries
@@ -217,7 +220,8 @@ nlohmann::json GeminiClient::call_gemini(
             server_error_retries++;
 
             // Exponential backoff: 5, 10, 20, 40, 80 seconds (capped at 120)
-            int wait_seconds = std::min(5 * (1 << (server_error_retries - 1)), 120);
+            // (shift clamped so it can't overflow if the retry limit is raised)
+            int wait_seconds = std::min(5 * (1 << std::min(server_error_retries - 1, 16)), 120);
 
             std::string error_msg;
             switch (res->status) {

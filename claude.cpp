@@ -73,6 +73,7 @@ void ClaudeClient::init_api_client() {
     mclog("Initializing API client connection to " + m_url + "\n");
 
     m_api_client = std::make_unique<httplib::Client>(m_url);
+    m_api_client->enable_server_certificate_verification(true);
 
     m_api_client->set_connection_timeout(CONNECTION_TIMEOUT_SECONDS);
     m_api_client->set_read_timeout(READ_TIMEOUT_SECONDS);
@@ -201,7 +202,8 @@ json ClaudeClient::call_claude(const std::string& user_message, const json& tool
             init_api_client();
 
             // Exponential backoff for connection retries: 2, 4, 8, 16, 32 seconds
-            int wait_seconds = std::min(CONNECTION_BACKOFF_BASE * (1 << (connection_retry_count - 1)), CONNECTION_BACKOFF_MAX);
+            // (shift clamped so it can't overflow if the retry limit is raised)
+            int wait_seconds = std::min(CONNECTION_BACKOFF_BASE * (1 << std::min(connection_retry_count - 1, 16)), CONNECTION_BACKOFF_MAX);
 
             std::ostringstream retry_msg;
             retry_msg << "Retrying in " << wait_seconds << " seconds...\n";
@@ -247,11 +249,13 @@ json ClaudeClient::call_claude(const std::string& user_message, const json& tool
                 }
             }
 
-            // Use exponential backoff if no valid retry-after header
+            // Use exponential backoff if no valid retry-after header.
             if (wait_seconds <= 0) {
-                // Exponential backoff: 5, 10, 20, 40, 80, 160 seconds (capped at 300)
-                wait_seconds = std::min(RATE_LIMIT_BACKOFF_BASE * (1 << (rate_limit_retries - 1)), RATE_LIMIT_BACKOFF_MAX);
+                wait_seconds = RATE_LIMIT_BACKOFF_BASE * (1 << std::min(rate_limit_retries - 1, 16));
             }
+            // Cap whatever we got (header or backoff) so a hostile/buggy
+            // retry-after can't make us sleep indefinitely.
+            wait_seconds = std::min(wait_seconds, RATE_LIMIT_BACKOFF_MAX);
 
             std::ostringstream log_msg;
             log_msg << "Rate limited (attempt " << rate_limit_retries << "/" << MAX_RATE_LIMIT_RETRIES
@@ -320,11 +324,12 @@ json ClaudeClient::call_claude(const std::string& user_message, const json& tool
                 }
             }
 
-            // Use exponential backoff if no retry-after header
+            // Use exponential backoff if no retry-after header.
             if (wait_seconds <= 0) {
-                // Exponential backoff: 5, 10, 20, 40, 80 seconds (capped at 120)
-                wait_seconds = std::min(SERVER_ERROR_BACKOFF_BASE * (1 << (server_error_retries - 1)), SERVER_ERROR_BACKOFF_MAX);
+                wait_seconds = SERVER_ERROR_BACKOFF_BASE * (1 << std::min(server_error_retries - 1, 16));
             }
+            // Cap whatever we got (header or backoff) against a hostile retry-after.
+            wait_seconds = std::min(wait_seconds, SERVER_ERROR_BACKOFF_MAX);
 
             std::string error_msg;
             switch (status) {

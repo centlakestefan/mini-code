@@ -17,6 +17,16 @@ std::string trim(const std::string& s) {
     return s.substr(begin, end - begin + 1);
 }
 
+// Replace CR/LF with spaces. The config format is one "key = value" per line,
+// so a newline in a key or value would corrupt the file on save.
+std::string strip_newlines(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        if (c == '\n' || c == '\r') c = ' ';
+    }
+    return out;
+}
+
 } // namespace
 
 Config Config::load(const fs::path& path) {
@@ -47,13 +57,15 @@ std::optional<std::string> Config::get(const std::string& key) const {
 }
 
 void Config::set(const std::string& key, const std::string& value) {
+    std::string k = strip_newlines(key);
+    std::string v = strip_newlines(value);
     for (auto& entry : entries_) {
-        if (entry.first == key) {
-            entry.second = value;
+        if (entry.first == k) {
+            entry.second = v;
             return;
         }
     }
-    entries_.emplace_back(key, value);
+    entries_.emplace_back(k, v);
 }
 
 bool Config::unset(const std::string& key) {
