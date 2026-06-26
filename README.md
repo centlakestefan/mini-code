@@ -88,8 +88,9 @@ Chat config keys:
 **API key from the environment:** the key is read from the provider's
 environment variable first — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
 `GEMINI_API_KEY` — and only falls back to the `api-key` config value if the
-variable isn't set. Using the config value prints a warning, since it's stored
-in plaintext; prefer the environment variable.
+variable isn't set. Writing the key to config (via `config set api-key` or the
+first-run prompt) prints a one-time plaintext-storage warning; using it
+afterward is silent.
 
 **Diagnostic logging:** off by default. Set `trace-file` to a path
 (`mini-code config set trace-file ./minicode.log`) to append request/response

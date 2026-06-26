@@ -133,6 +133,11 @@ int cmd_set(const Args& a) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     }
+    if (a.positional[1] == "api-key") {
+        std::cerr << "warning: api-key stored in plaintext at " << path.string()
+                  << "; set the provider's API key env var (e.g. ANTHROPIC_API_KEY) "
+                     "to avoid storing it on disk\n";
+    }
     return 0;
 }
 
@@ -312,17 +317,11 @@ std::optional<std::string> env_value(const char* name) {
 }
 
 // Resolve the API key for a provider: the provider's environment variable first,
-// otherwise the config value (warning that it's stored in plaintext).
+// otherwise the config value. (The plaintext warning is emitted when the key is
+// written, not on use.)
 std::optional<std::string> resolve_api_key(const std::string& provider) {
-    const char* var = api_key_env_var(provider);
-    if (auto v = env_value(var)) return v;
-    if (auto cfg = get_effective("api-key")) {
-        std::cerr << "warning: using api-key from plaintext config";
-        if (var && *var) std::cerr << "; set " << var << " to use an environment variable instead";
-        std::cerr << "\n";
-        return cfg;
-    }
-    return std::nullopt;
+    if (auto v = env_value(api_key_env_var(provider))) return v;
+    return get_effective("api-key");
 }
 
 const char* kDefaultSystemPrompt =
@@ -389,7 +388,13 @@ bool first_run_setup() {
         std::string line;
         if (!std::getline(std::cin, line)) return false;
         std::string key = trim(line);
-        if (!key.empty() && !set_global("api-key", key)) return false;
+        if (!key.empty()) {
+            if (!set_global("api-key", key)) return false;
+            std::cerr << "warning: api-key stored in plaintext at "
+                      << config_path(Level::Global).string();
+            if (keyvar && *keyvar) std::cerr << "; set " << keyvar << " to avoid storing it on disk";
+            std::cerr << "\n";
+        }
         // A blank entry means the user intends to use the environment variable.
     }
 
