@@ -1,45 +1,39 @@
 #pragma once
 
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
 
-// File-based diagnostic log. Replaces the old stderr Log singleton: everything
-// is appended to a log file so long sessions (and the request/response flow that
-// drives them) can be inspected after the fact.
-//
-// Location: $MINICODE_LOG if set, otherwise ~/.minicode/minicode.log.
+// Diagnostic logging, disabled by default. Enable it by setting the `trace-file`
+// config key to a path; main wires that to mclog_set_file() at startup. When no
+// trace file is configured, mclog() is a no-op, so nothing is written to disk
+// unless the user explicitly opts in.
 
-inline std::string mclog_path() {
-    if (const char* p = std::getenv("MINICODE_LOG")) {
-        if (*p) return p;
-    }
-#ifdef _WIN32
-    const char* home = std::getenv("USERPROFILE");
-#else
-    const char* home = std::getenv("HOME");
-#endif
-    std::filesystem::path base = (home && *home) ? std::filesystem::path(home)
-                                                 : std::filesystem::path(".");
-    return (base / ".minicode" / "minicode.log").string();
+inline std::mutex& mclog_mutex_() {
+    static std::mutex m;
+    return m;
 }
 
-// Append a message to the log file (best-effort; failures are ignored). Call
-// sites include their own trailing newline.
-inline void mclog(const std::string& msg) {
-    static std::mutex mtx;
-    static std::ofstream out = [] {
-        std::filesystem::path p = mclog_path();
-        std::error_code ec;
-        if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-        return std::ofstream(p, std::ios::app);
-    }();
+inline std::ofstream& mclog_stream_() {
+    static std::ofstream s;
+    return s;
+}
 
-    std::lock_guard<std::mutex> lock(mtx);
-    if (out) {
-        out << msg;
-        out.flush();
+// Point logging at `path` (appended to). An empty path disables logging.
+inline void mclog_set_file(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mclog_mutex_());
+    std::ofstream& s = mclog_stream_();
+    if (s.is_open()) s.close();
+    s.clear();
+    if (!path.empty()) s.open(path, std::ios::app);
+}
+
+// Append a message to the trace file, if one is configured.
+inline void mclog(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(mclog_mutex_());
+    std::ofstream& s = mclog_stream_();
+    if (s.is_open()) {
+        s << msg;
+        s.flush();
     }
 }

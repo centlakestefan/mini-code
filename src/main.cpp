@@ -7,9 +7,11 @@
 #include "openai.h"
 #include "gemini.h"
 #include "ai/aiconfig.h"
+#include "ai/log.h"
 
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -295,6 +297,34 @@ std::string default_model(const std::string& provider) {
     return "";
 }
 
+const char* api_key_env_var(const std::string& provider) {
+    if (provider == "claude") return "ANTHROPIC_API_KEY";
+    if (provider == "openai") return "OPENAI_API_KEY";
+    if (provider == "gemini") return "GEMINI_API_KEY";
+    return "";
+}
+
+std::optional<std::string> env_value(const char* name) {
+    if (name && *name) {
+        if (const char* v = std::getenv(name); v && *v) return std::string(v);
+    }
+    return std::nullopt;
+}
+
+// Resolve the API key for a provider: the provider's environment variable first,
+// otherwise the config value (warning that it's stored in plaintext).
+std::optional<std::string> resolve_api_key(const std::string& provider) {
+    const char* var = api_key_env_var(provider);
+    if (auto v = env_value(var)) return v;
+    if (auto cfg = get_effective("api-key")) {
+        std::cerr << "warning: using api-key from plaintext config";
+        if (var && *var) std::cerr << "; set " << var << " to use an environment variable instead";
+        std::cerr << "\n";
+        return cfg;
+    }
+    return std::nullopt;
+}
+
 const char* kDefaultSystemPrompt =
     "You are an experienced fullstack developer in a chat with a user. "
     "The user has started a session in a working folder. You have tools to "
@@ -349,16 +379,18 @@ bool first_run_setup() {
         if (!set_global("provider-type", provider)) return false;
     }
 
-    if (!get_effective("api-key")) {
-        std::cout << "API key: " << std::flush;
+    auto provider = get_effective("provider-type");
+    const char* keyvar = provider ? api_key_env_var(*provider) : "";
+    // Only prompt for an api-key if it isn't already available via the env var.
+    if (!env_value(keyvar) && !get_effective("api-key")) {
+        std::cout << "API key";
+        if (keyvar && *keyvar) std::cout << " (or leave blank to use $" << keyvar << ")";
+        std::cout << ": " << std::flush;
         std::string line;
         if (!std::getline(std::cin, line)) return false;
         std::string key = trim(line);
-        if (key.empty()) {
-            std::cerr << "error: api-key cannot be empty\n";
-            return false;
-        }
-        if (!set_global("api-key", key)) return false;
+        if (!key.empty() && !set_global("api-key", key)) return false;
+        // A blank entry means the user intends to use the environment variable.
     }
 
     std::cout << "Saved to " << config_path(Level::Global).string() << "\n\n";
@@ -366,19 +398,31 @@ bool first_run_setup() {
 }
 
 int cmd_chat() {
-    // First run / missing essentials: walk the user through interactive setup.
-    if (!get_effective("provider-type") || !get_effective("api-key")) {
-        if (!first_run_setup()) return 2; // setup prints its own errors
-    }
+    if (auto tf = get_effective("trace-file")) mclog_set_file(*tf);
+
+    // Essentials: provider-type plus an api-key available via the provider's
+    // environment variable or config. Run first-run setup if anything's missing.
     auto provider = get_effective("provider-type");
-    auto api_key = get_effective("api-key");
-    if (!provider || !api_key) {
-        std::cerr << "error: provider-type and api-key must be configured to chat.\n";
-        return 2;
+    auto have_key = [&] {
+        return provider && (env_value(api_key_env_var(*provider)) || get_effective("api-key"));
+    };
+    if (!provider || !have_key()) {
+        if (!first_run_setup()) return 2; // setup prints its own errors
+        provider = get_effective("provider-type");
+        if (!provider || !have_key()) {
+            std::cerr << "error: provider-type and api-key must be configured to chat.\n";
+            return 2;
+        }
     }
 
     std::string url = get_effective("provider-url").value_or(default_url(*provider));
     std::string model = get_effective("model").value_or(default_model(*provider));
+
+    auto key = resolve_api_key(*provider); // env var first, else config (with warning)
+    if (!key) {
+        std::cerr << "error: no api-key available for " << *provider << "\n";
+        return 2;
+    }
 
     // ai_config is declared before client so it outlives the client, which
     // holds a pointer to it.
@@ -392,11 +436,11 @@ int cmd_chat() {
     }
     std::unique_ptr<AiBackend> client;
     if (*provider == "claude") {
-        client = std::make_unique<ClaudeClient>(&ai_config, url, model, *api_key);
+        client = std::make_unique<ClaudeClient>(&ai_config, url, model, *key);
     } else if (*provider == "openai") {
-        client = std::make_unique<OpenAIClient>(&ai_config, url, model, *api_key);
+        client = std::make_unique<OpenAIClient>(&ai_config, url, model, *key);
     } else if (*provider == "gemini") {
-        client = std::make_unique<GeminiClient>(&ai_config, url, model, *api_key);
+        client = std::make_unique<GeminiClient>(&ai_config, url, model, *key);
     } else {
         std::cerr << "error: unknown provider-type '" << *provider
                   << "' (expected claude|openai|gemini)\n";

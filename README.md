@@ -83,6 +83,17 @@ Chat config keys:
 | `provider-url`  | no       | claude: `https://api.anthropic.com`, openai: `https://api.openai.com`, gemini: `https://generativelanguage.googleapis.com` |
 | `model`         | no       | claude: `claude-sonnet-4-6`, openai: `gpt-4o`, gemini: `gemini-2.0-flash` |
 | `max-output-tokens` | no   | `16000` — raise it for long replies (large tables, reports) |
+| `trace-file`    | no       | unset — set to a path to enable diagnostic logging |
+
+**API key from the environment:** the key is read from the provider's
+environment variable first — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+`GEMINI_API_KEY` — and only falls back to the `api-key` config value if the
+variable isn't set. Using the config value prints a warning, since it's stored
+in plaintext; prefer the environment variable.
+
+**Diagnostic logging:** off by default. Set `trace-file` to a path
+(`mini-code config set trace-file ./minicode.log`) to append request/response
+diagnostics there; unset it to disable.
 
 If a reply hits the output-token limit it is cut off and marked
 `[truncated: hit max output tokens - raise max-output-tokens]`; raise
