@@ -1,5 +1,9 @@
 # mini-code
 
+[![CI](https://github.com/centlakestefan/mini-code/actions/workflows/ci.yml/badge.svg)](https://github.com/centlakestefan/mini-code/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+
 A small, dependency-light command-line AI coding assistant for Windows and
 Linux. Chat with an AI model in your terminal and let it work in the current
 folder — read and edit files, search the tree, and run commands you've

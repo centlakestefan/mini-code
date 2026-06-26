@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      # The windows-latest runner ships OpenSSL; point CMake at it. Adjust the
+      # path here if a future runner image moves it.
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: ./build/mini-code version
