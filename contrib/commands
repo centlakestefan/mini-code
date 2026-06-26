@@ -15,7 +15,7 @@
 git-status = git status
 git-diff = git diff
 git-log = git log --oneline -n 20
-git-add-all = git add -A
+git-add = git add %p1
 git-commit = git commit -m %1
 git-pull = git pull
 git-push = git push

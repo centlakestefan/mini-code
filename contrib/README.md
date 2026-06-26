@@ -10,10 +10,14 @@ build your allow-list from scratch.
   `npm-build`, `cmake-build`), rather than a wildcard passthrough like
   `git %*`. The agent picks a name; it cannot choose arbitrary subcommands or
   flags.
-- **Placeholders only at data positions.** The only placeholder used is the
-  commit message (`git-commit = git commit -m %1`). Because parameterized
-  commands are passed as a literal argv vector (no shell), the value can't turn
-  into a flag — `git-commit` can never become `git push --force`.
+- **Placeholders only at data positions.** Where a value is needed it's always a
+  data position, never a flag/subcommand: a commit message
+  (`git-commit … -m %1`) or a sandbox-checked path (`git-add … %p1`). Because
+  parameterized commands are passed as a literal argv vector (no shell), a value
+  can't turn into a flag — `git-commit` can never become `git push --force`. And
+  a `%p` path is validated to be inside the launch folder before the command
+  runs, so `git-add` stays within the sandbox (unlike `git add -A`, which would
+  stage the whole repository).
 - **Terminating commands only.** `run_command` waits for the process to exit, so
   long-running commands (dev servers, `--watch`) would hang. They're left out on
   purpose — add your own only if you can bound them.
