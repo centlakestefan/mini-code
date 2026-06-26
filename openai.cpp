@@ -375,11 +375,11 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
 
     Log::instance().write("Start " + user_message + " ===\n");
 
-    // Same-line progress feedback while the model works through tool calls.
+    // Same-line progress feedback: "Thinking..." while waiting on the API and
+    // "[tool] ..." while a tool actually runs.
     bool printed_status = false;
-    auto show_tool = [&](const std::string& name, const json& input) {
+    auto set_status = [&](std::string s) {
         constexpr size_t W = 78;
-        std::string s = "[tool] " + getToolDisplayName(name, input);
         if (s.size() > W) s = s.substr(0, W - 3) + "...";
         if (!printed_status) std::cout << "\x1b[?25l"; // hide cursor during the wait
         std::cout << "\r" << s << "\x1b[K" << std::flush; // erase to end of line (no padding)
@@ -413,6 +413,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
         });
     }
 
+    set_status("Thinking...");
     json response = call_openai("", tools, m_conversation_history);
     if (!response.contains("choices") || response["choices"].empty()) {
         throw std::runtime_error("Invalid OpenAI response: " + response.dump());
@@ -476,7 +477,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
                 continue;
             }
 
-            show_tool(tool_name, tool_input);
+            set_status("[tool] " + getToolDisplayName(tool_name, tool_input));
             Log::instance().write("Executing tool: " + tool_name + "\n");
             Log::instance().write("Input: " + tool_input.dump(2) + "\n");
 
@@ -502,6 +503,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
             });
         }
 
+        set_status("Thinking...");
         response = call_openai("", tools, m_conversation_history);
         if (!response.contains("choices") || response["choices"].empty()) {
             throw std::runtime_error("Invalid OpenAI response: " + response.dump());
