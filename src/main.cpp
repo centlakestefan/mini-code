@@ -14,6 +14,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -366,7 +367,7 @@ int cmd_chat() {
     for (size_t i = 0; i < context.tools.size(); ++i) {
         std::cout << (i ? ", " : "") << context.tools[i].name;
     }
-    std::cout << "\nType /exit (or Ctrl-D) to quit.\n";
+    std::cout << "\nSlash commands: /list-commands, /add-command <name> <command...>, /exit\n";
 
     std::string line;
     while (true) {
@@ -377,6 +378,44 @@ int cmd_chat() {
         }
         if (line == "/exit" || line == "/quit") break;
         if (line.empty()) continue;
+
+        // In-session command management. Newly added commands are immediately
+        // runnable by the agent (run_command reads the store on each call).
+        if (line == "/list-commands") {
+            auto cmds = effective_commands();
+            if (cmds.empty()) {
+                std::cout << "(no commands configured)\n";
+            } else {
+                for (const auto& e : cmds) {
+                    std::cout << level_name(e.origin) << "\t" << e.name << " = " << e.command << "\n";
+                }
+            }
+            continue;
+        }
+        if (line.rfind("/add-command", 0) == 0) {
+            std::istringstream iss(line);
+            std::string slash, name;
+            iss >> slash >> name;
+            std::string remainder;
+            std::getline(iss, remainder);
+            size_t begin = remainder.find_first_not_of(" \t");
+            if (name.empty() || begin == std::string::npos) {
+                std::cout << "usage: /add-command <name> <command...>\n";
+                continue;
+            }
+            if (name.find('=') != std::string::npos) {
+                std::cout << "error: command name must not contain '='\n";
+                continue;
+            }
+            std::string cmdline = remainder.substr(begin);
+            try {
+                add_command(Level::Local, name, cmdline);
+                std::cout << "Added '" << name << "' (local): " << cmdline << "\n";
+            } catch (const std::exception& e) {
+                std::cout << "error: " << e.what() << "\n";
+            }
+            continue;
+        }
 
         try {
             std::string reply = client->chat(context, line);
