@@ -196,7 +196,13 @@ mini-code version                        # print version info as JSON
 Plain `key = value` lines; `#` and `;` begin comments.
 
 ```
-# mini-code config
+# mini-code
 api-key = sk_ant_xx23982932
-editor = vim
+model = claude-sonnet-4-6
 ```
+
+## License
+
+mini-code is licensed under the Apache License, Version 2.0 (SPDX:
+`Apache-2.0`). See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Copyright 2026 Centlake Software AB.
