@@ -80,7 +80,7 @@ std::vector<EffectiveEntry> effective_config() {
     std::vector<EffectiveEntry> merged;
 
     auto apply = [&](Level level) {
-        Config cfg = Config::load(config_path(level, false));
+        Config cfg = Config::load(config_path(level));
         for (const auto& entry : cfg.entries()) {
             bool found = false;
             for (auto& existing : merged) {
@@ -107,7 +107,7 @@ int cmd_set(const Args& a) {
         return 2;
     }
     Level level = a.level.value_or(Level::Local);
-    auto path = config_path(level, true);
+    auto path = config_path(level);
     Config cfg = Config::load(path);
     cfg.set(a.positional[1], a.positional[2]);
     try {
@@ -127,7 +127,7 @@ int cmd_get(const Args& a) {
     const std::string& key = a.positional[1];
 
     if (a.level) {
-        Config cfg = Config::load(config_path(*a.level, false));
+        Config cfg = Config::load(config_path(*a.level));
         if (auto value = cfg.get(key)) {
             std::cout << *value << "\n";
             return 0;
@@ -150,7 +150,7 @@ int cmd_unset(const Args& a) {
         return 2;
     }
     Level level = a.level.value_or(Level::Local);
-    auto path = config_path(level, true);
+    auto path = config_path(level);
     Config cfg = Config::load(path);
     if (!cfg.unset(a.positional[1])) {
         std::cerr << "error: key not found: " << a.positional[1] << "\n";
@@ -167,7 +167,7 @@ int cmd_unset(const Args& a) {
 
 int cmd_list(const Args& a) {
     if (a.level) {
-        Config cfg = Config::load(config_path(*a.level, false));
+        Config cfg = Config::load(config_path(*a.level));
         for (const auto& entry : cfg.entries()) {
             if (a.show_origin) std::cout << level_name(*a.level) << "\t";
             std::cout << entry.first << "=" << entry.second << "\n";
@@ -308,7 +308,7 @@ std::string ensure_system_prompt() {
     const std::string def = kDefaultSystemPrompt;
     for (Level lvl : {Level::System, Level::Global, Level::Local}) {
         try {
-            auto path = config_path(lvl, true);
+            auto path = config_path(lvl);
             Config cfg = Config::load(path);
             cfg.set("system-prompt", def);
             cfg.save(path);

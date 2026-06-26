@@ -34,36 +34,20 @@ fs::path global_store_path(const std::string& filename) {
     return home / ".minicode" / filename;
 }
 
-fs::path local_write_path(const std::string& filename) {
+fs::path local_path(const std::string& filename) {
     std::error_code ec;
     fs::path dir = fs::current_path(ec);
     if (ec) dir = ".";
     return dir / ".minicode" / filename;
 }
 
-// Walk up from the current directory looking for an existing ".minicode/<file>".
-fs::path local_read_path(const std::string& filename) {
-    std::error_code ec;
-    fs::path dir = fs::current_path(ec);
-    if (ec) return fs::path(".minicode") / filename;
-
-    for (;;) {
-        fs::path candidate = dir / ".minicode" / filename;
-        if (fs::exists(candidate, ec)) return candidate;
-        fs::path parent = dir.parent_path();
-        if (parent == dir) break; // reached filesystem root
-        dir = parent;
-    }
-    return local_write_path(filename);
-}
-
 // Resolve the path to a named store file ("config", "commands", ...) for a scope.
-fs::path store_path(Level level, const std::string& filename, bool for_writing) {
+// Local is always the current directory's ".minicode/<file>" (no upward search).
+fs::path store_path(Level level, const std::string& filename) {
     switch (level) {
         case Level::System: return system_store_path(filename);
         case Level::Global: return global_store_path(filename);
-        case Level::Local:  return for_writing ? local_write_path(filename)
-                                               : local_read_path(filename);
+        case Level::Local:  return local_path(filename);
     }
     return fs::path();
 }
@@ -79,12 +63,12 @@ const char* level_name(Level level) {
     return "unknown";
 }
 
-fs::path config_path(Level level, bool for_writing) {
-    return store_path(level, "config", for_writing);
+fs::path config_path(Level level) {
+    return store_path(level, "config");
 }
 
-fs::path commands_path(Level level, bool for_writing) {
-    return store_path(level, "commands", for_writing);
+fs::path commands_path(Level level) {
+    return store_path(level, "commands");
 }
 
 } // namespace minicode

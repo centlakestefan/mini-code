@@ -44,7 +44,7 @@ Three scopes, in increasing order of precedence:
 | -------- | ---------- | ---------------------------------------------------- |
 | system   | `--system` | `%PROGRAMDATA%\minicode\config` / `/etc/minicode/config` |
 | global   | `--global` | `~/.minicode/config` (user home)                     |
-| local    | `--local`  | nearest `.minicode/config` walking up from the CWD   |
+| local    | `--local`  | `./.minicode/config` in the current directory        |
 
 When reading, **local overrides global overrides system**. Writes default to
 the **local** scope; pass `--global` or `--system` to target another scope.
