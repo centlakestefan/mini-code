@@ -21,20 +21,16 @@ Fetched automatically at configure time via CMake `FetchContent` (needs git +
 network on the first configure):
 
 - [nlohmann/json](https://github.com/nlohmann/json) `v3.11.3` — JSON.
-- [cpp-httplib](https://github.com/yhirose/cpp-httplib) `v0.15.3` — HTTP client.
+- [cpp-httplib](https://github.com/yhirose/cpp-httplib) `v0.15.3` — HTTP client
+  used by the provider clients to talk to the chat APIs.
 
-**OpenSSL is required** (for HTTPS / `https://`). It must be installed and
+**OpenSSL is required** (the provider APIs are HTTPS). It must be installed and
 findable by CMake. On Linux install your distro's `libssl-dev` /
 `openssl-devel`. On Windows/MSVC, if it isn't auto-detected, point CMake at it:
 
 ```sh
 cmake -S . -B build -DOPENSSL_ROOT_DIR=C:/path/to/openssl
 ```
-
-`fetch` now supports both `http://` and `https://`. Server certificates are
-verified; cpp-httplib loads the OS trust store (the Windows system cert store
-on Windows). If you hit a certificate-verification error on a self-built
-OpenSSL, set `SSL_CERT_FILE` to a CA bundle.
 
 ## Config
 
@@ -63,7 +59,8 @@ mini-code config unset editor            # remove from local
 
 ## Chat
 
-`mini-code chat` starts an interactive chat with the configured AI provider.
+Running `mini-code` with no subcommand starts an interactive chat with the
+configured AI provider (chat is the default action).
 It prints a `>` prompt, reads a line, sends it to the provider, prints the
 reply, and repeats. Type `/exit` (or Ctrl-D) to quit.
 
@@ -72,7 +69,7 @@ Configure the provider first (use `--global` to apply everywhere):
 ```sh
 mini-code --global config set provider-type claude        # claude | openai | gemini
 mini-code --global config set api-key sk_ant_xx23982932
-mini-code chat
+mini-code                                                 # starts the chat
 ```
 
 Chat config keys:
@@ -161,8 +158,6 @@ mini-code command add fmt clang-format -i %p1   # only formats files in-tree
 
 ```sh
 mini-code version                        # print version info as JSON
-mini-code fetch http://example.com       # HTTP GET and print status + body
-mini-code fetch https://api.anthropic.com  # HTTPS works (TLS via OpenSSL)
 ```
 
 ### File format

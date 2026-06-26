@@ -1,6 +1,5 @@
 #include "minicode/commands.hpp"
 #include "minicode/config.hpp"
-#include "minicode/http_client.hpp"
 #include "minicode/paths.hpp"
 #include "minicode/tools.hpp"
 
@@ -30,7 +29,9 @@ const char* kUsage =
     "mini-code - a small cross-platform CLI\n"
     "\n"
     "Usage:\n"
+    "  mini-code                                    Start an interactive chat (default)\n"
     "  mini-code [--system|--global|--local] config <command> [args]\n"
+    "  mini-code [--system|--global|--local] command <add|remove|list> ...\n"
     "\n"
     "Config commands:\n"
     "  set <key> <value>   Set a config value (default scope: local)\n"
@@ -44,9 +45,7 @@ const char* kUsage =
     "  command list                      List configured commands\n"
     "\n"
     "Other commands:\n"
-    "  chat                Start an interactive chat with the configured provider\n"
     "  version             Print version info as JSON\n"
-    "  fetch <url>         HTTP GET a URL and print the response\n"
     "\n"
     "Chat config keys: provider-type (claude|openai|gemini), api-key,\n"
     "  provider-url (optional), model (optional)\n"
@@ -188,17 +187,6 @@ int cmd_version() {
     info["version"] = MINICODE_VERSION;
     std::cout << info.dump(2) << "\n";
     return 0;
-}
-
-int cmd_fetch(const std::string& url) {
-    HttpResponse res = http_get(url);
-    if (!res.ok) {
-        std::cerr << "error: " << res.error << "\n";
-        return 1;
-    }
-    std::cout << "status: " << res.status << "\n";
-    std::cout << res.body << "\n";
-    return (res.status >= 200 && res.status < 400) ? 0 : 1;
 }
 
 // Handles the `command` subcommand (add / remove / list). `rest` is the raw
@@ -463,20 +451,12 @@ int main(int argc, char** argv) {
         else rest.push_back(std::move(arg));
     }
 
+    // No subcommand: start a chat (it's the default action).
     if (rest.empty()) {
-        std::cout << kUsage;
-        return 0;
+        return cmd_chat();
     }
     const std::string& top = rest[0];
-    if (top == "chat") return cmd_chat();
     if (top == "version") return cmd_version();
-    if (top == "fetch") {
-        if (rest.size() < 2) {
-            std::cerr << "error: 'fetch' requires a <url>\n";
-            return 2;
-        }
-        return cmd_fetch(rest[1]);
-    }
     if (top != "config") {
         std::cerr << "error: unknown command '" << top << "'\n";
         return 2;

@@ -41,7 +41,6 @@ add_executable(mini-code
   src/config.cpp
   src/commands.cpp
   src/paths.cpp
-  src/http_client.cpp
   src/tools.cpp
   claude.cpp
   openai.cpp
