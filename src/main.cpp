@@ -9,8 +9,8 @@
 #include "minicode/claude.h"
 #include "minicode/openai.h"
 #include "minicode/gemini.h"
-#include "minicode/ai/aiconfig.h"
-#include "minicode/ai/log.h"
+#include "minicode/aiconfig.h"
+#include "minicode/log.h"
 
 #include <nlohmann/json.hpp>
 

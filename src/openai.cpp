@@ -12,7 +12,7 @@
 #include <string>
 #include <thread>
 
-#include "minicode/ai/log.h"
+#include "minicode/log.h"
 
 using json = nlohmann::json;
 

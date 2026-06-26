@@ -5,7 +5,7 @@
 
 #include <vector>
 
-#include "ai/tool_registry.h"
+#include "tool_registry.h"
 
 namespace minicode {
 

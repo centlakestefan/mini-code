@@ -4,7 +4,7 @@
 #include "minicode/tools.hpp"
 #include "minicode/commands.hpp"
 
-#include "minicode/ai/context.h"
+#include "minicode/context.h"
 
 #include <algorithm>
 #include <cstdio>

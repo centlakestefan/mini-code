@@ -12,10 +12,10 @@
 #include <nlohmann/json.hpp>
 #include <httplib.h>
 
-#include "ai/aibackend.h"
-#include "ai/tool_registry.h"
-#include "ai/context.h"
-#include "ai/aiconfig.h"
+#include "aibackend.h"
+#include "tool_registry.h"
+#include "context.h"
+#include "aiconfig.h"
 
 class GeminiClient : public AiBackend {
 private:
