@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Centlake Software AB
 
-#include "minicode/paths.hpp"
+#include "minicode/paths.h"
 
 #include <cstdlib>
 #include <system_error>

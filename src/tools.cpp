@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Centlake Software AB
 
-#include "minicode/tools.hpp"
-#include "minicode/commands.hpp"
+#include "minicode/tools.h"
+#include "minicode/commands.h"
 
 #include "minicode/context.h"
 

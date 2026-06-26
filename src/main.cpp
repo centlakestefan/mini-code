@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Centlake Software AB
 
-#include "minicode/commands.hpp"
-#include "minicode/config.hpp"
-#include "minicode/paths.hpp"
-#include "minicode/tools.hpp"
+#include "minicode/commands.h"
+#include "minicode/config.h"
+#include "minicode/paths.h"
+#include "minicode/tools.h"
 
 #include "minicode/claude.h"
 #include "minicode/openai.h"

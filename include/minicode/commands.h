@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "minicode/paths.hpp"
+#include "minicode/paths.h"
 
 namespace minicode {
 

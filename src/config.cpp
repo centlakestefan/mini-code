@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Centlake Software AB
 
-#include "minicode/config.hpp"
+#include "minicode/config.h"
 
 #include <fstream>
 #include <stdexcept>
