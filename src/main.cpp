@@ -302,41 +302,78 @@ const char* kDefaultSystemPrompt =
     "pre-approved commands (use list_commands to see them and run_command to "
     "run them).";
 
-// Returns the effective system prompt. If none is configured in any scope, the
-// built-in default is written so it can be edited later — preferring the
-// broadest writable scope (system, then global, then local). If no scope is
-// writable, the default is still used for this session.
-std::string ensure_system_prompt() {
-    if (auto existing = get_effective("system-prompt")) return *existing;
+// The effective system prompt: whatever is configured, else the built-in
+// default used in-memory. Chat never persists anything — persisting the default
+// is the job of `mini-code install`.
+std::string resolve_system_prompt() {
+    return get_effective("system-prompt").value_or(kDefaultSystemPrompt);
+}
 
-    const std::string def = kDefaultSystemPrompt;
-    for (Level lvl : {Level::System, Level::Global, Level::Local}) {
-        try {
-            auto path = config_path(lvl);
-            Config cfg = Config::load(path);
-            cfg.set("system-prompt", def);
-            cfg.save(path);
-            std::cerr << "(wrote default system-prompt to " << level_name(lvl) << " config)\n";
-            return def;
-        } catch (const std::exception&) {
-            // Scope not writable (e.g. no permission for system); try the next.
-        }
+// Trim surrounding whitespace (incl. a trailing CR from piped CRLF input).
+std::string trim(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// Write a key to the global (user) config scope.
+bool set_global(const std::string& key, const std::string& value) {
+    try {
+        auto path = config_path(Level::Global);
+        Config cfg = Config::load(path);
+        cfg.set(key, value);
+        cfg.save(path);
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return false;
     }
-    std::cerr << "(could not persist a default system-prompt; using built-in default)\n";
-    return def;
+}
+
+// First-run setup: when the essentials aren't configured, interactively prompt
+// for provider-type and api-key and store them in the global config. Returns
+// false if the user aborts (EOF) or gives invalid input.
+bool first_run_setup() {
+    std::cout << "Welcome to mini-code. Let's set up your AI provider.\n";
+
+    if (!get_effective("provider-type")) {
+        std::cout << "Provider (claude / openai / gemini): " << std::flush;
+        std::string line;
+        if (!std::getline(std::cin, line)) return false;
+        std::string provider = trim(line);
+        if (provider != "claude" && provider != "openai" && provider != "gemini") {
+            std::cerr << "error: provider must be claude, openai, or gemini\n";
+            return false;
+        }
+        if (!set_global("provider-type", provider)) return false;
+    }
+
+    if (!get_effective("api-key")) {
+        std::cout << "API key: " << std::flush;
+        std::string line;
+        if (!std::getline(std::cin, line)) return false;
+        std::string key = trim(line);
+        if (key.empty()) {
+            std::cerr << "error: api-key cannot be empty\n";
+            return false;
+        }
+        if (!set_global("api-key", key)) return false;
+    }
+
+    std::cout << "Saved to " << config_path(Level::Global).string() << "\n\n";
+    return true;
 }
 
 int cmd_chat() {
-    auto provider = get_effective("provider-type");
-    if (!provider) {
-        std::cerr << "error: provider-type is not configured.\n"
-                     "  run: mini-code --global config set provider-type <claude|openai|gemini>\n";
-        return 2;
+    // First run / missing essentials: walk the user through interactive setup.
+    if (!get_effective("provider-type") || !get_effective("api-key")) {
+        if (!first_run_setup()) return 2; // setup prints its own errors
     }
+    auto provider = get_effective("provider-type");
     auto api_key = get_effective("api-key");
-    if (!api_key) {
-        std::cerr << "error: api-key is not configured.\n"
-                     "  run: mini-code --global config set api-key <your-key>\n";
+    if (!provider || !api_key) {
+        std::cerr << "error: provider-type and api-key must be configured to chat.\n";
         return 2;
     }
 
@@ -367,7 +404,7 @@ int cmd_chat() {
     }
 
     client->start();
-    client->setSystemPrompt(ensure_system_prompt());
+    client->setSystemPrompt(resolve_system_prompt());
 
     // Register the file tools (editor + search) for this chat session.
     Context context;

@@ -64,7 +64,9 @@ configured AI provider (chat is the default action).
 It prints a `>` prompt, reads a line, sends it to the provider, prints the
 reply, and repeats. Type `/exit` (or Ctrl-D) to quit.
 
-Configure the provider first (use `--global` to apply everywhere):
+**First run:** if no provider/api-key is configured, mini-code prompts for them
+interactively and saves them to the global (`~/.minicode`) config, then starts
+the chat. You can also set them manually instead:
 
 ```sh
 mini-code --global config set provider-type claude        # claude | openai | gemini
