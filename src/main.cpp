@@ -310,9 +310,16 @@ const char* api_key_env_var(const std::string& provider) {
 }
 
 std::optional<std::string> env_value(const char* name) {
-    if (name && *name) {
-        if (const char* v = std::getenv(name); v && *v) return std::string(v);
-    }
+    if (!name || !*name) return std::nullopt;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // std::getenv is the portable, intended call here
+#endif
+    const char* v = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (v && *v) return std::string(v);
     return std::nullopt;
 }
 

@@ -60,7 +60,6 @@ target_link_libraries(mini-code PRIVATE
 
 if(MSVC)
   target_compile_options(mini-code PRIVATE /W4 /EHsc /utf-8)
-  target_compile_definitions(mini-code PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
   target_compile_options(mini-code PRIVATE -Wall -Wextra)
 endif()

@@ -10,7 +10,14 @@ namespace minicode {
 namespace {
 
 fs::path env_path(const char* name) {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // std::getenv is the portable, intended call here
+#endif
     const char* value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
     return value ? fs::path(value) : fs::path();
 }
 
