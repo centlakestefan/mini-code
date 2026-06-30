@@ -42,6 +42,7 @@ add_executable(tapto-code
   src/commands.cpp
   src/paths.cpp
   src/tools.cpp
+  src/ui.cpp
   src/claude.cpp
   src/openai.cpp
   src/gemini.cpp

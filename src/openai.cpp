@@ -13,8 +13,10 @@
 #include <thread>
 
 #include "tapto/log.h"
+#include "tapto/ui.h"
 
 using json = nlohmann::json;
+namespace ui = tapto::ui;
 
 namespace {
 
@@ -386,17 +388,6 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
 
     mclog("Start " + user_message + " ===\n");
 
-    // Same-line progress feedback: "Thinking..." while waiting on the API and
-    // "[tool] ..." while a tool actually runs.
-    bool printed_status = false;
-    auto set_status = [&](std::string s) {
-        constexpr size_t W = 78;
-        if (s.size() > W) s = s.substr(0, W - 3) + "...";
-        if (!printed_status) std::cout << "\x1b[?25l"; // hide cursor during the wait
-        std::cout << "\r" << s << "\x1b[K" << std::flush; // erase to end of line (no padding)
-        printed_status = true;
-    };
-
     // Convert tools to OpenAI format
     json tools = json::array();
     for (const auto& tool_spec : m_tools) {
@@ -424,7 +415,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
         });
     }
 
-    set_status("Thinking...");
+    ui::set_status("Thinking...", 0, max_iterations);
     json response = call_openai("", tools, m_conversation_history);
     if (!response.contains("choices") || response["choices"].empty()) {
         throw std::runtime_error("Invalid OpenAI response: " + response.dump());
@@ -444,12 +435,14 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
             std::string cot = extractReasoning(message);
             if (!cot.empty()) {
                 mclog("Assistant CoT: " + cot + "\n");
+                ui::emit_intermediate(cot, /*is_reasoning=*/true, m_config->printCot());
             }
         }
         {
             std::string text = extractContent(message);
             if (!text.empty()) {
                 mclog("Assistant text: " + text + "\n");
+                ui::emit_intermediate(text, /*is_reasoning=*/false, m_config->printCot());
             }
         }
 
@@ -488,7 +481,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
                 continue;
             }
 
-            set_status("[tool] " + getToolDisplayName(tool_name, tool_input));
+            ui::set_status(getToolDisplayName(tool_name, tool_input), iteration, max_iterations);
             mclog("Executing tool: " + tool_name + "\n");
             mclog("Input: " + tool_input.dump(2) + "\n");
 
@@ -507,6 +500,8 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
                 mclog("Unknown tool requested: " + tool_name + "\n");
             }
 
+            ui::commit_status(); // lock the tool line into the scroll buffer
+
             m_conversation_history.push_back({
                 {"role", "tool"},
                 {"tool_call_id", tool_id},
@@ -514,7 +509,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
             });
         }
 
-        set_status("Thinking...");
+        ui::set_status("Thinking...", iteration, max_iterations);
         response = call_openai("", tools, m_conversation_history);
         if (!response.contains("choices") || response["choices"].empty()) {
             throw std::runtime_error("Invalid OpenAI response: " + response.dump());
@@ -543,8 +538,7 @@ std::string OpenAIClient::chat(Context& context, const std::string& user_message
 
     mclog("=== Final Response === " + choice.value("finish_reason", "unknown") + "\n");
 
-    // Clear the progress line and restore the cursor before the reply prints.
-    if (printed_status) std::cout << "\r\x1b[K\x1b[?25h" << std::flush;
+    ui::end_status();
 
     // Collect the assistant's final text reply (falling back to reasoning
     // content for reasoning models that emit only that).

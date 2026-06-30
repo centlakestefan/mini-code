@@ -79,35 +79,97 @@ inline std::string formatUnknownToolError(const std::string& tool_name, const Re
     return msg;
 }
 
-// Human-friendly label for a tool invocation: the tool name plus the most
-// useful argument(s) so progress feedback shows what is actually happening
-// (e.g. "str_replace_based_edit_tool str_replace src/foo.cpp").
+// Human-friendly label for a tool invocation, shown on the status line while
+// the tool is running and committed to the scroll buffer afterwards.
+//
+// str_replace_based_edit_tool:
+//   view (directory)          -> "List dir/"
+//   view (file, range)        -> "View src/foo.cpp:10-50"
+//   view (file)               -> "View src/foo.cpp"
+//   create                    -> "Create src/foo.cpp"
+//   str_replace               -> "Edit src/foo.cpp"
+//   insert                    -> "Insert src/foo.cpp"
+//
+// find_files:
+//   with search_string        -> "Search *.cpp ~\"query\""
+//   without                   -> "Find *.cpp"
+//
+// list_commands               -> "List commands"
+//
+// run_command:
+//   with args                 -> "Run build arg1 arg2"
+//   without args              -> "Run build"
+//
+// Unknown tool                -> raw tool name
 inline std::string getToolDisplayName(const std::string& tool_name, const nlohmann::json& input) {
-    std::string label = tool_name;
-    if (input.is_object()) {
-        if (input.contains("command") && input["command"].is_string()) {
-            label += " " + input["command"].get<std::string>();
+
+    if (tool_name == "str_replace_based_edit_tool" && input.is_object()) {
+        std::string cmd  = input.contains("command") && input["command"].is_string()
+                           ? input["command"].get<std::string>() : "";
+        std::string path = input.contains("path") && input["path"].is_string()
+                           ? input["path"].get<std::string>() : "";
+
+        if (cmd == "view") {
+            // Append a trailing slash hint for directories (best-effort: check
+            // whether the last character already is one, otherwise just label it).
+            std::string label = "View " + path;
+            // view_range: show line numbers when present
+            if (input.contains("view_range")) {
+                const auto& vr = input["view_range"];
+                // Accept both a JSON array and a string-encoded array.
+                auto try_range = [&](const nlohmann::json& r) -> std::string {
+                    if (r.is_array() && r.size() == 2 &&
+                        r[0].is_number_integer() && r[1].is_number_integer()) {
+                        int end = r[1].get<int>();
+                        return ":" + std::to_string(r[0].get<int>()) +
+                               "-" + (end < 0 ? "EOF" : std::to_string(end));
+                    }
+                    return "";
+                };
+                if (vr.is_string()) {
+                    try {
+                        label += try_range(nlohmann::json::parse(vr.get<std::string>()));
+                    } catch (...) {}
+                } else {
+                    label += try_range(vr);
+                }
+            }
+            return label;
         }
-        if (input.contains("path") && input["path"].is_string()) {
-            label += " " + input["path"].get<std::string>();
-        }
-        if (input.contains("filename") && input["filename"].is_string()) {
-            label += " " + input["filename"].get<std::string>();
-        }
-        // run_command takes its target as "name" (and there is no "command" key
-        // to collide with on that tool), plus optional positional "args".
-        if (!input.contains("command") && input.contains("name") && input["name"].is_string()) {
-            label += " " + input["name"].get<std::string>();
-        }
+        if (cmd == "create")     return "Create "  + path;
+        if (cmd == "str_replace") return "Edit "   + path;
+        if (cmd == "insert")     return "Insert "  + path;
+        // Unknown sub-command: fall back to path only.
+        return path.empty() ? tool_name : path;
+    }
+
+    if (tool_name == "find_files" && input.is_object()) {
+        std::string pattern = input.contains("filename") && input["filename"].is_string()
+                              ? input["filename"].get<std::string>() : "*";
+        bool has_query = input.contains("search_string") &&
+                         input["search_string"].is_string() &&
+                         !input["search_string"].get<std::string>().empty();
+        if (has_query)
+            return "Search " + pattern + " ~\"" + input["search_string"].get<std::string>() + "\"";
+        return "Find " + pattern;
+    }
+
+    if (tool_name == "list_commands") {
+        return "List commands";
+    }
+
+    if (tool_name == "run_command" && input.is_object()) {
+        std::string name = input.contains("name") && input["name"].is_string()
+                           ? input["name"].get<std::string>() : "?";
+        std::string label = "Run " + name;
         if (input.contains("args") && input["args"].is_array()) {
             for (const auto& a : input["args"]) {
                 if (a.is_string()) label += " " + a.get<std::string>();
             }
         }
-        if (input.contains("search_string") && input["search_string"].is_string()) {
-            const std::string& q = input["search_string"].get_ref<const std::string&>();
-            if (!q.empty()) label += " ~\"" + q + "\"";
-        }
+        return label;
     }
-    return label;
+
+    // Unknown / future tool: return the raw name so nothing is lost.
+    return tool_name;
 }

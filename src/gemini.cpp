@@ -12,8 +12,10 @@
 #include <thread>
 
 #include "tapto/log.h"
+#include "tapto/ui.h"
 
 using json = nlohmann::json;
+namespace ui = tapto::ui;
 
 // --- GeminiClient Method Implementations ---
 
@@ -278,17 +280,6 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
 
     mclog("Start " + user_message + " ===\n");
 
-    // Same-line progress feedback: "Thinking..." while waiting on the API and
-    // "[tool] ..." while a tool actually runs.
-    bool printed_status = false;
-    auto set_status = [&](std::string s) {
-        constexpr size_t W = 78;
-        if (s.size() > W) s = s.substr(0, W - 3) + "...";
-        if (!printed_status) std::cout << "\x1b[?25l"; // hide cursor during the wait
-        std::cout << "\r" << s << "\x1b[K" << std::flush; // erase to end of line (no padding)
-        printed_status = true;
-    };
-
     // Use the pre-loaded tool definitions (convert to Gemini format)
     json tool_schemas = json::array();
     for (const auto& tool_spec : m_tools) {
@@ -310,7 +301,7 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
         });
     }
 
-    set_status("Thinking...");
+    ui::set_status("Thinking...", 0, max_iterations);
     json response = call_gemini("", tool_schemas, m_conversation_history);
     mclog("Gemini API response body: " + response.dump(2) + "\n");
 
@@ -337,12 +328,26 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
         json tool_calls = json::array();
 
         for (const auto& part : model_response_message["parts"]) {
-            if (part.contains("text")) {
-                has_text = true;
-                mclog("assistant says: " + part["text"].get<std::string>() + "\n");
-            }
             if (part.contains("functionCall")) {
                 tool_calls.push_back(part["functionCall"]);
+            }
+        }
+
+        // Surface text/reasoning to the user only when this turn also calls
+        // tools. On the final-answer turn the caller prints the reply, so
+        // emitting here would duplicate it.
+        for (const auto& part : model_response_message["parts"]) {
+            if (!part.contains("text")) continue;
+            std::string text = part["text"].get<std::string>();
+            bool is_thought = part.value("thought", false);
+            if (is_thought) {
+                mclog("assistant thinks: " + text + "\n");
+            } else {
+                has_text = true;
+                mclog("assistant says: " + text + "\n");
+            }
+            if (!tool_calls.empty()) {
+                ui::emit_intermediate(text, /*is_reasoning=*/is_thought, m_config->printCot());
             }
         }
 
@@ -366,7 +371,7 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
             std::string tool_name = func_call["name"];
             json args = func_call.value("args", json::object());
 
-            set_status("[tool] " + getToolDisplayName(tool_name, args));
+            ui::set_status(getToolDisplayName(tool_name, args), iteration, max_iterations);
             mclog("Executing tool: " + tool_name + "\n");
             mclog("Input: " + args.dump(2) + "\n");
 
@@ -385,6 +390,8 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
                 result = formatUnknownToolError(tool_name, m_tool_registry);
                 mclog("Unknown tool requested: " + tool_name + "\n");
             }
+
+            ui::commit_status(); // lock the tool line into the scroll buffer
 
             // Format the tool result as a function_response part for Gemini
             tool_response_parts.push_back({
@@ -405,7 +412,7 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
             {"parts", tool_response_parts}
         });
 
-        set_status("Thinking...");
+        ui::set_status("Thinking...", iteration, max_iterations);
         response = call_gemini("", tool_schemas, m_conversation_history);
         mclog("Gemini API response body: " + response.dump(2) + "\n");
 
@@ -451,13 +458,12 @@ std::string GeminiClient::chat(Context& context, const std::string& user_message
 
     mclog("=== Final Response ===" + finish_reason + "\n");
 
-    // Clear the progress line and restore the cursor before the reply prints.
-    if (printed_status) std::cout << "\r\x1b[K\x1b[?25h" << std::flush;
+    ui::end_status();
 
     // Collect the assistant's final text reply.
     std::string reply;
     for (const auto& part : model_response_message["parts"]) {
-        if (part.contains("text")) {
+        if (part.contains("text") && !part.value("thought", false)) {
             reply += part["text"].get<std::string>();
         }
     }

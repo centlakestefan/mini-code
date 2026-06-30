@@ -11,11 +11,13 @@
 #include "tapto/gemini.h"
 #include "tapto/aiconfig.h"
 #include "tapto/log.h"
+#include "tapto/ui.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
-#include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -69,7 +71,8 @@ const char* kUsage =
     "  version             Print version info as JSON\n"
     "\n"
     "Chat config keys: provider-type (claude|openai|gemini), api-key,\n"
-    "  provider-url (optional), model (optional), max-output-tokens (optional)\n"
+    "  provider-url (optional), model (optional), max-output-tokens (optional),\n"
+    "  print-cot (optional, default true)\n"
     "\n"
     "Scope flags:\n"
     "  --system   machine-wide config\n"
@@ -125,7 +128,7 @@ std::vector<EffectiveEntry> effective_config() {
 bool is_supported_config_key(const std::string& key) {
     static const char* kKeys[] = {
         "provider-type", "api-key", "provider-url", "model",
-        "max-output-tokens", "system-prompt", "trace-file",
+        "max-output-tokens", "system-prompt", "trace-file", "print-cot",
     };
     for (const char* k : kKeys) {
         if (key == k) return true;
@@ -135,13 +138,13 @@ bool is_supported_config_key(const std::string& key) {
 
 int cmd_set(const Args& a) {
     if (a.positional.size() < 3) {
-        std::cerr << "error: 'set' requires <key> <value>\n";
+        ui::print_error("'set' requires <key> <value>");
         return 2;
     }
     if (!is_supported_config_key(a.positional[1])) {
-        std::cerr << "error: unknown config key '" << a.positional[1]
-                  << "'.\n  supported keys: provider-type, api-key, provider-url, "
-                     "model, max-output-tokens, system-prompt, trace-file\n";
+        ui::print_error("unknown config key '" + a.positional[1] +
+                        "'.\n  supported keys: provider-type, api-key, provider-url, "
+                        "model, max-output-tokens, system-prompt, trace-file, print-cot");
         return 2;
     }
     Level level = a.level.value_or(Level::Local);
@@ -151,20 +154,20 @@ int cmd_set(const Args& a) {
     try {
         cfg.save(path);
     } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        ui::print_error(e.what());
         return 1;
     }
     if (a.positional[1] == "api-key") {
-        std::cerr << "warning: api-key stored in plaintext at " << path.string()
-                  << "; set the provider's API key env var (e.g. ANTHROPIC_API_KEY) "
-                     "to avoid storing it on disk\n";
+        ui::print_warning("api-key stored in plaintext at " + path.string() +
+                          "; set the provider's API key env var (e.g. ANTHROPIC_API_KEY) "
+                          "to avoid storing it on disk");
     }
     return 0;
 }
 
 int cmd_get(const Args& a) {
     if (a.positional.size() < 2) {
-        std::cerr << "error: 'get' requires <key>\n";
+        ui::print_error("'get' requires <key>");
         return 2;
     }
     const std::string& key = a.positional[1];
@@ -172,7 +175,7 @@ int cmd_get(const Args& a) {
     if (a.level) {
         Config cfg = Config::load(config_path(*a.level));
         if (auto value = cfg.get(key)) {
-            std::cout << *value << "\n";
+            ui::print_line(*value);
             return 0;
         }
         return 1; // not found
@@ -180,7 +183,7 @@ int cmd_get(const Args& a) {
 
     for (const auto& entry : effective_config()) {
         if (entry.key == key) {
-            std::cout << entry.value << "\n";
+            ui::print_line(entry.value);
             return 0;
         }
     }
@@ -189,20 +192,20 @@ int cmd_get(const Args& a) {
 
 int cmd_unset(const Args& a) {
     if (a.positional.size() < 2) {
-        std::cerr << "error: 'unset' requires <key>\n";
+        ui::print_error("'unset' requires <key>");
         return 2;
     }
     Level level = a.level.value_or(Level::Local);
     auto path = config_path(level);
     Config cfg = Config::load(path);
     if (!cfg.unset(a.positional[1])) {
-        std::cerr << "error: key not found: " << a.positional[1] << "\n";
+        ui::print_error("key not found: " + a.positional[1]);
         return 1;
     }
     try {
         cfg.save(path);
     } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        ui::print_error(e.what());
         return 1;
     }
     return 0;
@@ -223,15 +226,17 @@ int cmd_list(const Args& a) {
     if (a.level) {
         Config cfg = Config::load(config_path(*a.level));
         for (const auto& entry : cfg.entries()) {
-            if (a.show_origin) std::cout << level_name(*a.level) << "\t";
-            std::cout << entry.first << "=" << list_value(entry.first, entry.second) << "\n";
+            ui::print_config_entry(a.show_origin ? level_name(*a.level) : "",
+                                   entry.first,
+                                   list_value(entry.first, entry.second));
         }
         return 0;
     }
 
     for (const auto& entry : effective_config()) {
-        if (a.show_origin) std::cout << level_name(entry.origin) << "\t";
-        std::cout << entry.key << "=" << list_value(entry.key, entry.value) << "\n";
+        ui::print_config_entry(a.show_origin ? level_name(entry.origin) : "",
+                               entry.key,
+                               list_value(entry.key, entry.value));
     }
     return 0;
 }
@@ -240,7 +245,7 @@ int cmd_version() {
     nlohmann::json info;
     info["name"] = "tapto-code";
     info["version"] = TAPTO_VERSION;
-    std::cout << info.dump(2) << "\n";
+    ui::print_line(info.dump(2));
     return 0;
 }
 
@@ -249,19 +254,19 @@ int cmd_version() {
 // line containing tokens like --build or --config.
 int cmd_command(std::optional<Level> level, const std::vector<std::string>& rest) {
     if (rest.empty()) {
-        std::cerr << "usage: tapto-code [--scope] command <add|remove|list> ...\n";
+        ui::print_usage("usage: tapto-code [--scope] command <add|remove|list> ...\n");
         return 2;
     }
     const std::string& sub = rest[0];
 
     if (sub == "add") {
         if (rest.size() < 3) {
-            std::cerr << "error: 'command add' requires <name> <command...>\n";
+            ui::print_error("'command add' requires <name> <command...>");
             return 2;
         }
         const std::string& name = rest[1];
         if (name.find_first_of(" \t=") != std::string::npos) {
-            std::cerr << "error: command name must not contain spaces or '='\n";
+            ui::print_error("command name must not contain spaces or '='");
             return 2;
         }
         std::string cmdline;
@@ -273,42 +278,42 @@ int cmd_command(std::optional<Level> level, const std::vector<std::string>& rest
         try {
             add_command(lvl, name, cmdline);
         } catch (const std::exception& e) {
-            std::cerr << "error: " << e.what() << "\n";
+            ui::print_error(e.what());
             return 1;
         }
-        std::cout << "Added '" << name << "' (" << level_name(lvl) << "): " << cmdline << "\n";
+        ui::print_command_added(name, level_name(lvl), cmdline);
         return 0;
     }
 
     if (sub == "remove" || sub == "rm") {
         if (rest.size() < 2) {
-            std::cerr << "error: 'command remove' requires <name>\n";
+            ui::print_error("'command remove' requires <name>");
             return 2;
         }
         Level lvl = level.value_or(Level::Local);
         if (!remove_command(lvl, rest[1])) {
-            std::cerr << "error: command not found in " << level_name(lvl)
-                      << " scope: " << rest[1] << "\n";
+            ui::print_error("command not found in " + std::string(level_name(lvl)) +
+                            " scope: " + rest[1]);
             return 1;
         }
-        std::cout << "Removed '" << rest[1] << "' from " << level_name(lvl) << "\n";
+        ui::print_command_removed(rest[1], level_name(lvl));
         return 0;
     }
 
     if (sub == "list") {
         if (level) {
             for (const auto& e : commands_in_scope(*level)) {
-                std::cout << e.name << " = " << e.command << "\n";
+                ui::print_command_entry("", e.name, e.command);
             }
         } else {
             for (const auto& e : effective_commands()) {
-                std::cout << level_name(e.origin) << "\t" << e.name << " = " << e.command << "\n";
+                ui::print_command_entry(level_name(e.origin), e.name, e.command);
             }
         }
         return 0;
     }
 
-    std::cerr << "error: unknown command subcommand '" << sub << "'\n";
+    ui::print_error("unknown command subcommand '" + sub + "'");
     return 2;
 }
 
@@ -394,7 +399,7 @@ bool set_global(const std::string& key, const std::string& value) {
         cfg.save(path);
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        ui::print_error(e.what());
         return false;
     }
 }
@@ -403,15 +408,15 @@ bool set_global(const std::string& key, const std::string& value) {
 // for provider-type and api-key and store them in the global config. Returns
 // false if the user aborts (EOF) or gives invalid input.
 bool first_run_setup() {
-    std::cout << "Welcome to tapto-code. Let's set up your AI provider.\n";
+    ui::print_setup_welcome();
 
     if (!get_effective("provider-type")) {
-        std::cout << "Provider (claude / openai / gemini): " << std::flush;
+        ui::print_setup_provider_prompt();
         std::string line;
         if (!std::getline(std::cin, line)) return false;
         std::string provider = trim(line);
         if (provider != "claude" && provider != "openai" && provider != "gemini") {
-            std::cerr << "error: provider must be claude, openai, or gemini\n";
+            ui::print_error("provider must be claude, openai, or gemini");
             return false;
         }
         if (!set_global("provider-type", provider)) return false;
@@ -421,23 +426,22 @@ bool first_run_setup() {
     const char* keyvar = provider ? api_key_env_var(*provider) : "";
     // Only prompt for an api-key if it isn't already available via the env var.
     if (!env_value(keyvar) && !get_effective("api-key")) {
-        std::cout << "API key";
-        if (keyvar && *keyvar) std::cout << " (or leave blank to use $" << keyvar << ")";
-        std::cout << ": " << std::flush;
+        ui::print_setup_apikey_prompt(keyvar);
         std::string line;
         if (!std::getline(std::cin, line)) return false;
         std::string key = trim(line);
         if (!key.empty()) {
             if (!set_global("api-key", key)) return false;
-            std::cerr << "warning: api-key stored in plaintext at "
-                      << config_path(Level::Global).string();
-            if (keyvar && *keyvar) std::cerr << "; set " << keyvar << " to avoid storing it on disk";
-            std::cerr << "\n";
+            std::string warn = "api-key stored in plaintext at " +
+                               config_path(Level::Global).string();
+            if (keyvar && *keyvar)
+                warn += "; set " + std::string(keyvar) + " to avoid storing it on disk";
+            ui::print_warning(warn);
         }
         // A blank entry means the user intends to use the environment variable.
     }
 
-    std::cout << "Saved to " << config_path(Level::Global).string() << "\n\n";
+    ui::print_setup_saved(config_path(Level::Global).string());
     return true;
 }
 
@@ -454,7 +458,7 @@ int cmd_chat() {
         if (!first_run_setup()) return 2; // setup prints its own errors
         provider = get_effective("provider-type");
         if (!provider || !have_key()) {
-            std::cerr << "error: provider-type and api-key must be configured to chat.\n";
+            ui::print_error("provider-type and api-key must be configured to chat.");
             return 2;
         }
     }
@@ -464,7 +468,7 @@ int cmd_chat() {
 
     auto key = resolve_api_key(*provider); // env var first, else config (with warning)
     if (!key) {
-        std::cerr << "error: no api-key available for " << *provider << "\n";
+        ui::print_error("no api-key available for " + *provider);
         return 2;
     }
 
@@ -475,8 +479,15 @@ int cmd_chat() {
         try {
             ai_config.setMaxOutputTokens(std::stoi(*v));
         } catch (const std::exception&) {
-            std::cerr << "warning: invalid max-output-tokens '" << *v << "', using default\n";
+            ui::print_warning("invalid max-output-tokens '" + *v + "', using default");
         }
+    }
+    if (auto v = get_effective("print-cot")) {
+        // Default is on; only "false"/"0"/"off"/"no" (case-insensitive) disable it.
+        std::string s = *v;
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        ai_config.setPrintCot(!(s == "false" || s == "0" || s == "off" || s == "no"));
     }
     std::unique_ptr<AiBackend> client;
     if (*provider == "claude") {
@@ -486,8 +497,7 @@ int cmd_chat() {
     } else if (*provider == "gemini") {
         client = std::make_unique<GeminiClient>(&ai_config, url, model, *key);
     } else {
-        std::cerr << "error: unknown provider-type '" << *provider
-                  << "' (expected claude|openai|gemini)\n";
+        ui::print_error("unknown provider-type '" + *provider + "' (expected claude|openai|gemini)");
         return 2;
     }
 
@@ -498,19 +508,17 @@ int cmd_chat() {
     Context context;
     context.tools = builtin_tools();
 
-    std::cout << "tapto-code chat - provider: " << *provider << ", model: " << model << "\n"
-              << "Tools: ";
-    for (size_t i = 0; i < context.tools.size(); ++i) {
-        std::cout << (i ? ", " : "") << context.tools[i].name;
-    }
-    std::cout << "\nSlash commands: /clear, /list-commands, /add-command <name> <command...>, /exit\n";
+    std::vector<std::string> tool_names;
+    for (const auto& t : context.tools) tool_names.push_back(t.name);
+    ui::print_chat_header(*provider, model, tool_names);
+    ui::print_chat_hints();
 
     std::string line;
     while (true) {
-        std::cout << "\x1b[?25h> " << std::flush; // ensure cursor is visible at the prompt
+        ui::print_prompt("\x1b[?25h> "); // ensure cursor is visible at the prompt
         if (!std::getline(std::cin, line)) {
-            std::cout << "\n";
-            break; // EOF (Ctrl-D / Ctrl-Z)
+            ui::print_line(""); // move past the prompt on EOF (Ctrl-D / Ctrl-Z)
+            break;
         }
         if (line == "/exit" || line == "/quit") break;
         if (line.empty()) continue;
@@ -518,7 +526,7 @@ int cmd_chat() {
         // Reset the conversation (e.g. to recover after filling the context window).
         if (line == "/clear") {
             client->start();
-            std::cout << "(conversation cleared)\n";
+            ui::print_line("(conversation cleared)");
             continue;
         }
 
@@ -527,10 +535,10 @@ int cmd_chat() {
         if (line == "/list-commands") {
             auto cmds = effective_commands();
             if (cmds.empty()) {
-                std::cout << "(no commands configured)\n";
+                ui::print_no_commands();
             } else {
                 for (const auto& e : cmds) {
-                    std::cout << level_name(e.origin) << "\t" << e.name << " = " << e.command << "\n";
+                    ui::print_command_entry(level_name(e.origin), e.name, e.command);
                 }
             }
             continue;
@@ -543,28 +551,28 @@ int cmd_chat() {
             std::getline(iss, remainder);
             size_t begin = remainder.find_first_not_of(" \t");
             if (name.empty() || begin == std::string::npos) {
-                std::cout << "usage: /add-command <name> <command...>\n";
+                ui::print_line("usage: /add-command <name> <command...>");
                 continue;
             }
             if (name.find('=') != std::string::npos) {
-                std::cout << "error: command name must not contain '='\n";
+                ui::print_line("error: command name must not contain '='");
                 continue;
             }
             std::string cmdline = remainder.substr(begin);
             try {
                 add_command(Level::Local, name, cmdline);
-                std::cout << "Added '" << name << "' (local): " << cmdline << "\n";
+                ui::print_command_added(name, "local", cmdline);
             } catch (const std::exception& e) {
-                std::cout << "error: " << e.what() << "\n";
+                ui::print_line("error: " + std::string(e.what()));
             }
             continue;
         }
 
         try {
             std::string reply = client->chat(context, line);
-            std::cout << reply << "\n";
+            ui::print_reply(reply);
         } catch (const std::exception& e) {
-            std::cerr << "error: " << e.what() << "\n";
+            ui::print_error(e.what());
         }
     }
     return 0;
@@ -604,7 +612,7 @@ int main(int argc, char** argv) {
         else if (arg == "--global") a.level = Level::Global;
         else if (arg == "--local") a.level = Level::Local;
         else if (arg == "--show-origin") a.show_origin = true;
-        else if (arg == "-h" || arg == "--help") { std::cout << kUsage; return 0; }
+        else if (arg == "-h" || arg == "--help") { ui::print_usage(kUsage); return 0; }
         else rest.push_back(std::move(arg));
     }
 
@@ -615,13 +623,13 @@ int main(int argc, char** argv) {
     const std::string& top = rest[0];
     if (top == "version") return cmd_version();
     if (top != "config") {
-        std::cerr << "error: unknown command '" << top << "'\n";
+        ui::print_error("unknown command '" + top + "'");
         return 2;
     }
 
     a.positional.assign(rest.begin() + 1, rest.end());
     if (a.positional.empty()) {
-        std::cerr << kUsage;
+        ui::print_usage(kUsage);
         return 2;
     }
 
@@ -631,6 +639,6 @@ int main(int argc, char** argv) {
     if (sub == "unset") return cmd_unset(a);
     if (sub == "list")  return cmd_list(a);
 
-    std::cerr << "error: unknown config command '" << sub << "'\n";
+    ui::print_error("unknown config command '" + sub + "'");
     return 2;
 }

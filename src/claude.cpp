@@ -12,8 +12,10 @@
 #include <thread>
 
 #include "tapto/log.h"
+#include "tapto/ui.h"
 
 using json = nlohmann::json;
+namespace ui = tapto::ui;
 
 namespace {
 
@@ -381,17 +383,6 @@ std::string ClaudeClient::chat(Context& context, const std::string& user_message
 
     mclog("Start " + user_message + " ===\n");
 
-    // Same-line progress feedback: "Thinking..." while waiting on the API and
-    // "[tool] ..." while a tool actually runs.
-    bool printed_status = false;
-    auto set_status = [&](std::string s) {
-        constexpr size_t W = 78;
-        if (s.size() > W) s = s.substr(0, W - 3) + "...";
-        if (!printed_status) std::cout << "\x1b[?25l"; // hide cursor during the wait
-        std::cout << "\r" << s << "\x1b[K" << std::flush; // erase to end of line (no padding)
-        printed_status = true;
-    };
-
     auto has_tool_use = [](const json& resp) {
         if (!resp.contains("content")) return false;
         for (const auto& b : resp["content"]) {
@@ -420,7 +411,7 @@ std::string ClaudeClient::chat(Context& context, const std::string& user_message
             });
     }
 
-    set_status("Thinking...");
+    ui::set_status("Thinking...", 0, max_iterations);
     json response = call_claude("", tools, m_conversation_history);
     if (!response.contains("content") || !response.contains("stop_reason")) {
         throw std::runtime_error("Invalid Claude response: " + response.dump());
@@ -440,15 +431,24 @@ std::string ClaudeClient::chat(Context& context, const std::string& user_message
         json tool_results = json::array();
 
         for (const auto& block : response["content"]) {
-            if (block["type"] == "text") {
-                mclog("assistant says: " + block["text"].get<std::string>() + "\n");
+            if (block["type"] == "thinking") {
+                std::string cot = block.value("thinking", std::string());
+                if (!cot.empty()) {
+                    mclog("assistant thinks: " + cot + "\n");
+                    ui::emit_intermediate(cot, /*is_reasoning=*/true, m_config->printCot());
+                }
+            }
+            else if (block["type"] == "text") {
+                std::string text = block["text"].get<std::string>();
+                mclog("assistant says: " + text + "\n");
+                ui::emit_intermediate(text, /*is_reasoning=*/false, m_config->printCot());
             }
             else if (block["type"] == "tool_use") {
                 std::string tool_name = block["name"];
                 std::string tool_id = block["id"];
                 json tool_input = block["input"];
 
-                set_status("[tool] " + getToolDisplayName(tool_name, tool_input));
+                ui::set_status(getToolDisplayName(tool_name, tool_input), iteration, max_iterations);
                 mclog("Executing tool: " + tool_name + "\n");
                 mclog("Input: " + tool_input.dump(2) + "\n");
 
@@ -468,6 +468,8 @@ std::string ClaudeClient::chat(Context& context, const std::string& user_message
                     mclog("Unknown tool requested: " + tool_name + "\n");
                 }
 
+                ui::commit_status(); // lock the tool line into the scroll buffer
+
                 tool_results.push_back({
                     {"type", "tool_result"},
                     {"tool_use_id", tool_id},
@@ -482,7 +484,7 @@ std::string ClaudeClient::chat(Context& context, const std::string& user_message
             {"content", tool_results}
             });
 
-        set_status("Thinking...");
+        ui::set_status("Thinking...", iteration, max_iterations);
         response = call_claude("", tools, m_conversation_history);
         if (!response.contains("content") || !response.contains("stop_reason")) {
             throw std::runtime_error("Invalid Claude response: " + response.dump());
@@ -516,8 +518,7 @@ std::string ClaudeClient::chat(Context& context, const std::string& user_message
 
     mclog("=== Final Response === " + response.value("stop_reason", std::string("unknown")) + "\n");
 
-    // Clear the progress line and restore the cursor before the reply prints.
-    if (printed_status) std::cout << "\r\x1b[K\x1b[?25h" << std::flush;
+    ui::end_status();
 
     // Collect the assistant's final text reply.
     std::string reply;
