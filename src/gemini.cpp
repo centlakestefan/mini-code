@@ -32,7 +32,10 @@ void GeminiClient::init_api_client() {
     mclog("Initializing Gemini API client connection to " + m_url + "\n");
 
     m_api_client = std::make_unique<httplib::Client>(m_url);
-    m_api_client->enable_server_certificate_verification(true);
+    // Certificate verification only applies to https endpoints; skip it for plain http.
+    if (m_url.rfind("https://", 0) == 0) {
+        m_api_client->enable_server_certificate_verification(true);
+    }
 
     m_api_client->set_connection_timeout(30);
     m_api_client->set_read_timeout(120);
