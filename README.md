@@ -116,6 +116,7 @@ Chat config keys:
 | `provider-url`  | no       | claude: `https://api.anthropic.com`, openai: `https://api.openai.com`, gemini: `https://generativelanguage.googleapis.com` |
 | `model`         | no       | claude: `claude-sonnet-4-6`, openai: `gpt-4o`, gemini: `gemini-2.0-flash` |
 | `max-output-tokens` | no   | `16000` — raise it for long replies (large tables, reports) |
+| `print-cot`     | no       | `true` — show the model's intermediate reasoning/text during tool calls; set `false` to keep it in the trace file only |
 | `trace-file`    | no       | unset — set to a path to enable diagnostic logging |
 
 **API key from the environment:** the key is read from the provider's
