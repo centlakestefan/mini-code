@@ -10,34 +10,524 @@
 namespace tapto::ui {
 
 // ---------------------------------------------------------------------------
-// Internal state
+// Markdown renderer
 // ---------------------------------------------------------------------------
+//
+// A single-pass, line-oriented renderer that maps common Markdown constructs
+// to ANSI escape sequences. It is intentionally simple: no block-level nesting
+// (e.g. blockquote inside a list), no HTML passthrough. Those are rare in
+// practice and would complicate the code significantly for little gain.
+//
+// Inline span pass handles: **bold**, *italic*, `code`.
+// Block pass handles: headings, fenced code blocks, bullet/numbered lists,
+// blockquotes, horizontal rules, tables.
 
 namespace {
 
-// True while a status line is visible on the terminal (cursor is on that row).
-// Used to decide whether an erase sequence must be emitted before any
-// permanent output, and to guard the cursor-hide/show escape pair.
-bool g_status_visible = false;
+// --- ANSI helpers -----------------------------------------------------------
 
-// The last string written to the status line, kept so commit_status() can
-// re-emit it as a permanent scroll line without the caller having to repeat it.
+constexpr const char* kReset     = "\x1b[0m";
+constexpr const char* kBold      = "\x1b[1m";
+constexpr const char* kDim       = "\x1b[2m";
+constexpr const char* kItalic    = "\x1b[3m";
+constexpr const char* kUnderline = "\x1b[4m";
+constexpr const char* kCyan      = "\x1b[36m"; // inline code
+constexpr const char* kYellow    = "\x1b[33m"; // warnings
+constexpr const char* kRed       = "\x1b[31m"; // errors
+
+// --- Inline span rendering --------------------------------------------------
+
+// Forward-declared because bold/italic recurse into it.
+std::string render_inline(const std::string& line);
+
+std::string render_inline(const std::string& line) {
+    std::string out;
+    out.reserve(line.size() + 64);
+    const size_t n = line.size();
+    size_t i = 0;
+    while (i < n) {
+        char c = line[i];
+
+        // Inline code: `...`
+        if (c == '`') {
+            size_t end = line.find('`', i + 1);
+            if (end != std::string::npos) {
+                out += kCyan;
+                out += line.substr(i + 1, end - i - 1);
+                out += kReset;
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // Bold: **...**
+        if (c == '*' && i + 1 < n && line[i + 1] == '*') {
+            size_t end = line.find("**", i + 2);
+            if (end != std::string::npos) {
+                out += kBold;
+                out += render_inline(line.substr(i + 2, end - i - 2));
+                out += kReset;
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // Italic: *...* (single star, not **).
+        if (c == '*' && (i + 1 >= n || line[i + 1] != '*')) {
+            size_t end = i + 1;
+            while (end < n) {
+                if (line[end] == '*' && (end + 1 >= n || line[end + 1] != '*')) break;
+                ++end;
+            }
+            if (end < n) {
+                out += kItalic;
+                out += render_inline(line.substr(i + 1, end - i - 1));
+                out += kReset;
+                i = end + 1;
+                continue;
+            }
+        }
+
+        out += c;
+        ++i;
+    }
+    return out;
+}
+
+// --- Horizontal rule detection ----------------------------------------------
+
+// Returns true for CommonMark thematic breaks: 3+ '-', '*', or '_' with
+// optional spaces, and nothing else on the line.
+bool is_hr(const std::string& line) {
+    if (line.empty()) return false;
+    char marker = '\0';
+    int count = 0;
+    for (char c : line) {
+        if (c == ' ') continue;
+        if (marker == '\0') {
+            if (c != '-' && c != '*' && c != '_') return false;
+            marker = c;
+        }
+        if (c != marker) return false;
+        ++count;
+    }
+    return count >= 3;
+}
+
+// --- Table helpers ----------------------------------------------------------
+
+// Returns the terminal display width of a UTF-8 string.
+// ASCII: 1 column. Wide (CJK, emoji, etc.): 2 columns. Continuation bytes and
+// combining characters: 0 columns added (they compose onto the base glyph).
+// This is a best-effort approximation without pulling in a full Unicode database.
+size_t display_width(const std::string& s) {
+    size_t width = 0;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
+    const unsigned char* end = p + s.size();
+    while (p < end) {
+        unsigned char b = *p;
+        uint32_t cp = 0;
+        int bytes = 1;
+        if (b < 0x80) {
+            cp = b;
+            bytes = 1;
+        } else if ((b & 0xE0) == 0xC0) {
+            cp = b & 0x1F; bytes = 2;
+        } else if ((b & 0xF0) == 0xE0) {
+            cp = b & 0x0F; bytes = 3;
+        } else if ((b & 0xF8) == 0xF0) {
+            cp = b & 0x07; bytes = 4;
+        } else {
+            // Continuation byte or invalid — skip.
+            ++p; continue;
+        }
+        for (int i = 1; i < bytes && p + i < end; ++i)
+            cp = (cp << 6) | (p[i] & 0x3F);
+        p += bytes;
+
+        // Combining / zero-width characters contribute 0 columns.
+        if ((cp >= 0x0300 && cp <= 0x036F) ||   // Combining Diacritical Marks
+            (cp >= 0x1DC0 && cp <= 0x1DFF) ||   // Combining Diacritical Supplement
+            (cp >= 0x20D0 && cp <= 0x20FF) ||   // Combining Diacritical for Symbols
+            (cp >= 0xFE20 && cp <= 0xFE2F) ||   // Combining Half Marks
+            cp == 0xFE0F ||                       // Variation Selector-16 (emoji style)
+            cp == 0x200D) {                       // Zero Width Joiner
+            continue;
+        }
+
+        // Wide characters (CJK unified, compatibility, radicals, symbols, emoji).
+        if ((cp >= 0x1100  && cp <= 0x115F)  ||  // Hangul Jamo
+            (cp >= 0x2E80  && cp <= 0x303E)  ||  // CJK Radicals / Kangxi
+            (cp >= 0x3041  && cp <= 0x33BF)  ||  // Hiragana … CJK Compatibility
+            (cp >= 0x33FF  && cp <= 0xA4CF)  ||  // CJK Unified Ideographs ext.
+            (cp >= 0xA960  && cp <= 0xA97F)  ||  // Hangul Jamo Extended-A
+            (cp >= 0xAC00  && cp <= 0xD7FF)  ||  // Hangul Syllables
+            (cp >= 0xF900  && cp <= 0xFAFF)  ||  // CJK Compatibility Ideographs
+            (cp >= 0xFE10  && cp <= 0xFE1F)  ||  // Vertical Forms
+            (cp >= 0xFE30  && cp <= 0xFE6F)  ||  // CJK Compatibility Forms
+            (cp >= 0xFF00  && cp <= 0xFF60)  ||  // Fullwidth Forms
+            (cp >= 0xFFE0  && cp <= 0xFFE6)  ||  // Fullwidth Signs
+            (cp >= 0x1B000 && cp <= 0x1B0FF) ||  // Kana Supplement
+            (cp >= 0x1F004 && cp <= 0x1F0CF) ||  // Mahjong / Playing Cards
+            (cp >= 0x1F300 && cp <= 0x1F9FF) ||  // Misc Symbols, Emoticons, etc.
+            (cp >= 0x20000 && cp <= 0x2FFFD) ||  // CJK Extension B–F
+            (cp >= 0x30000 && cp <= 0x3FFFD)) {  // CJK Extension G+
+            width += 2;
+        } else {
+            width += 1;
+        }
+    }
+    return width;
+}
+
+// Split a Markdown table row on '|', trimming whitespace from each cell.
+// Leading/trailing empty cells from the outer pipes are dropped.
+std::vector<std::string> split_table_row(const std::string& line) {
+    std::vector<std::string> cells;
+    size_t i = 0;
+    const size_t n = line.size();
+    // Skip leading pipe if present.
+    if (i < n && line[i] == '|') ++i;
+    std::string cell;
+    for (; i < n; ++i) {
+        if (line[i] == '|') {
+            // Trim whitespace.
+            size_t s = cell.find_first_not_of(' ');
+            size_t e = cell.find_last_not_of(' ');
+            cells.push_back(s == std::string::npos ? "" : cell.substr(s, e - s + 1));
+            cell.clear();
+        } else {
+            cell += line[i];
+        }
+    }
+    // Last cell (trailing pipe already consumed above or absent).
+    {
+        size_t s = cell.find_first_not_of(' ');
+        size_t e = cell.find_last_not_of(' ');
+        std::string last = s == std::string::npos ? "" : cell.substr(s, e - s + 1);
+        if (!last.empty()) cells.push_back(last);
+    }
+    return cells;
+}
+
+// Returns true if every non-empty, non-space character in the line is one of
+// '|', '-', ':', making it a GFM separator row (e.g. |---|:---:|---| ).
+bool is_table_separator(const std::string& line) {
+    bool has_dash = false;
+    for (char c : line) {
+        if (c == ' ' || c == '|' || c == ':') continue;
+        if (c == '-') { has_dash = true; continue; }
+        return false;
+    }
+    return has_dash;
+}
+
+// Returns true if the line looks like a table row (contains at least one '|').
+bool is_table_row(const std::string& line) {
+    return line.find('|') != std::string::npos;
+}
+
+// Strip inline Markdown markers (* ` _) so we can measure the visible glyph
+// width of a cell without the syntax characters inflating the count.
+// This does NOT produce rendered output — it only removes the markers.
+std::string strip_inline_markers(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        char c = s[i];
+        // Inline code: `...` — drop the backticks, keep the content.
+        if (c == '`') {
+            size_t end = s.find('`', i + 1);
+            if (end != std::string::npos) {
+                out += s.substr(i + 1, end - i - 1);
+                i = end + 1;
+                continue;
+            }
+        }
+        // Bold: **...**
+        if (c == '*' && i + 1 < n && s[i + 1] == '*') {
+            size_t end = s.find("**", i + 2);
+            if (end != std::string::npos) {
+                out += strip_inline_markers(s.substr(i + 2, end - i - 2));
+                i = end + 2;
+                continue;
+            }
+        }
+        // Italic: *...*
+        if (c == '*' && (i + 1 >= n || s[i + 1] != '*')) {
+            size_t end = i + 1;
+            while (end < n) {
+                if (s[end] == '*' && (end + 1 >= n || s[end + 1] != '*')) break;
+                ++end;
+            }
+            if (end < n) {
+                out += strip_inline_markers(s.substr(i + 1, end - i - 1));
+                i = end + 1;
+                continue;
+            }
+        }
+        out += c;
+        ++i;
+    }
+    return out;
+}
+
+// Render a collected table (header row + data rows) into out.
+// Columns are padded to uniform width per column.
+void render_table(std::string& out,
+                  const std::vector<std::string>& header,
+                  const std::vector<std::vector<std::string>>& rows) {
+    // Compute column widths in visible terminal columns.
+    // We strip Markdown syntax markers first (** * ` etc.) because those
+    // characters are consumed by render_inline() and never reach the terminal,
+    // so counting them would over-estimate the cell width and break alignment.
+    // display_width() then handles multi-byte / wide (CJK, emoji) glyphs.
+    const size_t ncols = header.size();
+    std::vector<size_t> widths(ncols, 0);
+    for (size_t c = 0; c < ncols; ++c)
+        widths[c] = display_width(strip_inline_markers(header[c]));
+    for (const auto& row : rows)
+        for (size_t c = 0; c < row.size() && c < ncols; ++c)
+            widths[c] = std::max(widths[c], display_width(strip_inline_markers(row[c])));
+
+    // Helper: emit one row, padding each cell to its column width.
+    auto emit_row = [&](const std::vector<std::string>& cells, bool is_header) {
+        out += kDim;
+        out += "│";
+        out += kReset;
+        for (size_t c = 0; c < ncols; ++c) {
+            const std::string& cell = c < cells.size() ? cells[c] : "";
+            std::string rendered = render_inline(cell);
+            if (is_header)
+                out += std::string(" ") + kBold + rendered + kReset;
+            else
+                out += " " + rendered;
+            // Pad to column width. Must measure the same way widths[] was
+            // computed: strip Markdown markers first, then count display cols.
+            size_t raw_len = c < cells.size()
+                ? display_width(strip_inline_markers(cells[c])) : 0;
+            if (raw_len < widths[c])
+                out.append(widths[c] - raw_len, ' ');
+            out += " ";
+            out += kDim;
+            out += "│";
+            out += kReset;
+        }
+        out += "\n";
+    };
+
+    // Helper: emit a horizontal divider.
+    auto emit_divider = [&](bool heavy) {
+        out += kDim;
+        out += heavy ? "├" : "┼";
+        for (size_t c = 0; c < ncols; ++c) {
+            for (size_t k = 0; k < widths[c] + 2; ++k) out += "─";
+            out += (c + 1 < ncols) ? "┼" : (heavy ? "┤" : "┤");
+        }
+        out += kReset;
+        out += "\n";
+    };
+
+    // Top border.
+    out += kDim;
+    out += "┌";
+    for (size_t c = 0; c < ncols; ++c) {
+        for (size_t k = 0; k < widths[c] + 2; ++k) out += "─";
+        out += (c + 1 < ncols) ? "┬" : "┐";
+    }
+    out += kReset;
+    out += "\n";
+
+    // Header row + divider.
+    emit_row(header, true);
+    emit_divider(true);
+
+    // Data rows.
+    for (size_t r = 0; r < rows.size(); ++r) {
+        emit_row(rows[r], false);
+        if (r + 1 < rows.size()) emit_divider(false);
+    }
+
+    // Bottom border.
+    out += kDim;
+    out += "└";
+    for (size_t c = 0; c < ncols; ++c) {
+        for (size_t k = 0; k < widths[c] + 2; ++k) out += "─";
+        out += (c + 1 < ncols) ? "┴" : "┘";
+    }
+    out += kReset;
+    out += "\n";
+}
+
+
+
+// --- Block-level rendering --------------------------------------------------
+
+std::string render_markdown(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() * 2);
+
+    // Split into lines, preserving blank lines as paragraph separators.
+    std::vector<std::string> lines;
+    {
+        std::string cur;
+        for (char c : text) {
+            if (c == '\n') { lines.push_back(cur); cur.clear(); }
+            else            { cur += c; }
+        }
+        lines.push_back(cur);
+    }
+
+    bool in_fence = false;
+    std::string fence_lang;
+
+    // Table accumulation state.
+    bool in_table = false;
+    std::vector<std::string>              table_header;
+    std::vector<std::vector<std::string>> table_rows;
+
+    // Flush a completed table and reset state.
+    auto flush_table = [&]() {
+        if (!in_table) return;
+        if (!table_header.empty())
+            render_table(out, table_header, table_rows);
+        in_table = false;
+        table_header.clear();
+        table_rows.clear();
+    };
+
+    for (const std::string& raw : lines) {
+
+        // ---- Fenced code block toggle --------------------------------------
+        if (raw.size() >= 3 && raw.substr(0, 3) == "```") {
+            flush_table();
+            if (!in_fence) {
+                in_fence   = true;
+                fence_lang = raw.size() > 3 ? raw.substr(3) : "";
+                out += kDim;
+                if (!fence_lang.empty()) out += fence_lang + "\n";
+            } else {
+                in_fence = false;
+                out += kReset;
+                out += "\n";
+            }
+            continue;
+        }
+
+        // ---- Inside a fenced code block ------------------------------------
+        if (in_fence) {
+            out += raw + "\n";
+            continue;
+        }
+
+        // ---- Table rows ----------------------------------------------------
+        if (is_table_row(raw)) {
+            if (is_table_separator(raw)) {
+                // Separator row: marks end of header, start of body — skip.
+                continue;
+            }
+            auto cells = split_table_row(raw);
+            if (!in_table) {
+                // First pipe-row is the header.
+                in_table     = true;
+                table_header = std::move(cells);
+            } else {
+                table_rows.push_back(std::move(cells));
+            }
+            continue;
+        }
+
+        // Any non-table line ends an active table.
+        flush_table();
+
+        // ---- Horizontal rule -----------------------------------------------
+        if (is_hr(raw)) {
+            out += kDim;
+            out.append(60, '-');
+            out += kReset;
+            out += "\n";
+            continue;
+        }
+
+        // ---- Headings: # / ## / ### ----------------------------------------
+        if (!raw.empty() && raw[0] == '#') {
+            size_t level = 0;
+            while (level < raw.size() && raw[level] == '#') ++level;
+            std::string content = level < raw.size() ? raw.substr(level) : "";
+            if (!content.empty() && content[0] == ' ') content = content.substr(1);
+
+            if (level == 1)
+                out += std::string(kBold) + kUnderline + content + kReset + "\n";
+            else if (level == 2)
+                out += std::string(kBold) + content + kReset + "\n";
+            else
+                out += std::string(kDim) + content + kReset + "\n";
+            continue;
+        }
+
+        // ---- Blockquote: > -------------------------------------------------
+        if (!raw.empty() && raw[0] == '>') {
+            std::string content = raw.size() > 1 ? raw.substr(1) : "";
+            if (!content.empty() && content[0] == ' ') content = content.substr(1);
+            out += std::string(kDim) + "│ " + kReset;
+            out += kDim + render_inline(content) + kReset + "\n";
+            continue;
+        }
+
+        // ---- Bullet list: - / * / + ----------------------------------------
+        if (raw.size() >= 2 &&
+            (raw[0] == '-' || raw[0] == '*' || raw[0] == '+') &&
+            raw[1] == ' ') {
+            out += "  • " + render_inline(raw.substr(2)) + "\n";
+            continue;
+        }
+
+        // Indented bullet (2 spaces + marker) — one level of nesting.
+        if (raw.size() >= 4 && raw[0] == ' ' && raw[1] == ' ' &&
+            (raw[2] == '-' || raw[2] == '*' || raw[2] == '+') &&
+            raw[3] == ' ') {
+            out += "    ◦ " + render_inline(raw.substr(4)) + "\n";
+            continue;
+        }
+
+        // ---- Numbered list: 1. ---------------------------------------------
+        {
+            size_t j = 0;
+            while (j < raw.size() && raw[j] >= '0' && raw[j] <= '9') ++j;
+            if (j > 0 && j + 1 < raw.size() && raw[j] == '.' && raw[j + 1] == ' ') {
+                out += "  " + raw.substr(0, j + 1) + " " +
+                       render_inline(raw.substr(j + 2)) + "\n";
+                continue;
+            }
+        }
+
+        // ---- Plain paragraph line ------------------------------------------
+        out += render_inline(raw) + "\n";
+    }
+
+    flush_table();
+    if (in_fence) out += kReset; // safety reset if block was never closed
+
+    return out;
+}
+
+// --- Status line state ------------------------------------------------------
+
+bool        g_status_visible = false;
 std::string g_status_text;
 
-// Erase the current status line content without moving to a new line, so
-// the next write starts at column 0 on the same row.
 void erase_status_line() {
     std::cout << "\r\x1b[K";
 }
 
-// Build the prefix that goes before the action text on the status line.
-// Returns "" for the initial thinking phase (iteration == 0).
 std::string iteration_prefix(int iteration, int max_iterations) {
     if (iteration <= 0) return "";
     return "[" + std::to_string(iteration) + "/" + std::to_string(max_iterations) + "] ";
 }
 
-} // namespace
+} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // Progress / status line
@@ -59,7 +549,6 @@ void set_status(const std::string& text, int iteration, int max_iterations) {
 
 void commit_status() {
     if (!g_status_visible) return;
-    // Print the saved line as a permanent scroll entry, then move to a fresh line.
     std::cout << "\r" << g_status_text << "\x1b[K\n" << std::flush;
     g_status_visible = false;
     g_status_text.clear();
@@ -80,13 +569,13 @@ void emit_intermediate(const std::string& text, bool is_reasoning, bool print_co
     if (text.empty() || !print_cot) return;
     if (g_status_visible) erase_status_line();
     if (is_reasoning)
-        std::cout << "\x1b[90m" << text << "\x1b[0m\n" << std::flush; // dimmed
+        std::cout << kDim << text << kReset << "\n" << std::flush;
     else
         std::cout << text << "\n" << std::flush;
 }
 
 void print_reply(const std::string& text) {
-    std::cout << text << "\n";
+    std::cout << render_markdown(text);
 }
 
 void print_line(const std::string& text) {
@@ -94,11 +583,11 @@ void print_line(const std::string& text) {
 }
 
 void print_error(const std::string& text) {
-    std::cerr << "error: " << text << "\n";
+    std::cerr << kRed << "error: " << text << kReset << "\n";
 }
 
 void print_warning(const std::string& text) {
-    std::cerr << "warning: " << text << "\n";
+    std::cerr << kYellow << "warning: " << text << kReset << "\n";
 }
 
 void print_usage(const std::string& text) {
