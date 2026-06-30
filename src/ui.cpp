@@ -575,7 +575,7 @@ void emit_intermediate(const std::string& text, bool is_reasoning, bool print_co
 }
 
 void print_reply(const std::string& text) {
-    std::cout << render_markdown(text);
+    std::cout << render_markdown(text) << "\n";
 }
 
 void print_line(const std::string& text) {
@@ -640,6 +640,10 @@ void print_setup_saved(const std::string& path) {
 
 void print_prompt(const std::string& text) {
     std::cout << text << std::flush;
+}
+
+void print_prompt_accepted() {
+    std::cout << "\n" << std::flush;
 }
 
 // ---------------------------------------------------------------------------

@@ -568,6 +568,7 @@ int cmd_chat() {
             continue;
         }
 
+        ui::print_prompt_accepted();
         try {
             std::string reply = client->chat(context, line);
             ui::print_reply(reply);

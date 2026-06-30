@@ -89,6 +89,10 @@ void print_setup_saved(const std::string& path);
 // Print a plaintext prompt for interactive use (no newline, flushes).
 void print_prompt(const std::string& text);
 
+// Print a blank line after the user has submitted their prompt, separating
+// the input line from the model's response.
+void print_prompt_accepted();
+
 
 // --- Config / command listing ---------------------------------------------
 
