@@ -26,8 +26,8 @@
 
 using namespace tapto;
 
-#ifndef TAPTO_VERSION
-#define TAPTO_VERSION "0.0.0-dev"
+#ifndef TAPTO_CODE_VERSION
+#define TAPTO_CODE_VERSION "0.1.0"
 #endif
 
 namespace {
@@ -244,7 +244,7 @@ int cmd_list(const Args& a) {
 int cmd_version() {
     nlohmann::json info;
     info["name"] = "tapto-code";
-    info["version"] = TAPTO_VERSION;
+    info["version"] = TAPTO_CODE_VERSION;
     ui::print_line(info.dump(2));
     return 0;
 }
@@ -508,7 +508,7 @@ int cmd_chat() {
     Context context;
     context.tools = builtin_tools();
 
-    ui::print_banner(TAPTO_VERSION, *provider, model);
+    ui::print_banner(TAPTO_CODE_VERSION, *provider, model);
     std::string line;
     while (true) {
         ui::print_prompt("\x1b[?25h> "); // ensure cursor is visible at the prompt
