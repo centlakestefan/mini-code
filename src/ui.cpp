@@ -7,6 +7,15 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+#else
+#  include <sys/ioctl.h>
+#  include <unistd.h>
+#endif
+
 namespace tapto::ui {
 
 // ---------------------------------------------------------------------------
@@ -274,6 +283,78 @@ std::string strip_inline_markers(const std::string& s) {
     return out;
 }
 
+// Returns the current terminal column width, or 80 as a safe fallback when
+// stdout is redirected or the query fails.
+size_t terminal_width() {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+        return static_cast<size_t>(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+#else
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        return static_cast<size_t>(ws.ws_col);
+#endif
+    return 80;
+}
+
+// Clip a raw (pre-render) cell string to at most `max_cols` visible columns,
+// appending '…' (1 column) if truncation was needed.
+// Returns the clipped raw string and sets `out_width` to its display width.
+std::string clip_cell(const std::string& raw, size_t max_cols, size_t& out_width) {
+    if (max_cols == 0) { out_width = 0; return ""; }
+    // Walk the string codepoint-by-codepoint until we would exceed max_cols.
+    // Reserve one column for the ellipsis so the final cell is still ≤ max_cols.
+    const unsigned char* p   = reinterpret_cast<const unsigned char*>(raw.data());
+    const unsigned char* end = p + raw.size();
+    size_t width = 0;
+    const unsigned char* clip_at = p; // byte position where we must stop
+    while (p < end) {
+        unsigned char b = *p;
+        int bytes = 1;
+        uint32_t cp = 0;
+        if      (b < 0x80)            { cp = b;        bytes = 1; }
+        else if ((b & 0xE0) == 0xC0)  { cp = b & 0x1F; bytes = 2; }
+        else if ((b & 0xF0) == 0xE0)  { cp = b & 0x0F; bytes = 3; }
+        else if ((b & 0xF8) == 0xF0)  { cp = b & 0x07; bytes = 4; }
+        else                          { ++p; continue; }
+        for (int i = 1; i < bytes && p + i < end; ++i)
+            cp = (cp << 6) | (p[i] & 0x3F);
+
+        size_t cw = 1;
+        if ((cp >= 0x1100  && cp <= 0x115F)  || (cp >= 0x2E80  && cp <= 0x303E)  ||
+            (cp >= 0x3041  && cp <= 0x33BF)  || (cp >= 0x33FF  && cp <= 0xA4CF)  ||
+            (cp >= 0xA960  && cp <= 0xA97F)  || (cp >= 0xAC00  && cp <= 0xD7FF)  ||
+            (cp >= 0xF900  && cp <= 0xFAFF)  || (cp >= 0xFE10  && cp <= 0xFE1F)  ||
+            (cp >= 0xFE30  && cp <= 0xFE6F)  || (cp >= 0xFF00  && cp <= 0xFF60)  ||
+            (cp >= 0xFFE0  && cp <= 0xFFE6)  || (cp >= 0x1B000 && cp <= 0x1B0FF) ||
+            (cp >= 0x1F004 && cp <= 0x1F0CF) || (cp >= 0x1F300 && cp <= 0x1F9FF) ||
+            (cp >= 0x20000 && cp <= 0x2FFFD) || (cp >= 0x30000 && cp <= 0x3FFFD))
+            cw = 2;
+        // Zero-width / combining: cw stays 0 effectively — treat as 0.
+        if ((cp >= 0x0300 && cp <= 0x036F) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+            (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F) ||
+            cp == 0xFE0F || cp == 0x200D)
+            cw = 0;
+
+        if (width + cw > max_cols) {
+            // Would overflow — stop here and append ellipsis.
+            std::string clipped(reinterpret_cast<const char*>(
+                reinterpret_cast<const unsigned char*>(raw.data())),
+                static_cast<size_t>(clip_at -
+                    reinterpret_cast<const unsigned char*>(raw.data())));
+            clipped += "\xe2\x80\xa6"; // UTF-8 for U+2026 HORIZONTAL ELLIPSIS
+            out_width = width + 1;     // ellipsis occupies 1 column
+            return clipped;
+        }
+        width += cw;
+        clip_at = p + bytes;
+        p += bytes;
+    }
+    out_width = width;
+    return raw; // no clipping needed
+}
+
 // Render a collected table (header row + data rows) into out.
 // Columns are padded to uniform width per column.
 void render_table(std::string& out,
@@ -292,6 +373,26 @@ void render_table(std::string& out,
         for (size_t c = 0; c < row.size() && c < ncols; ++c)
             widths[c] = std::max(widths[c], display_width(strip_inline_markers(row[c])));
 
+    // Shrink column widths so the table fits within the terminal.
+    // Total rendered width = 1 (left border) + ncols * (1 space + width + 1 space)
+    //                      + ncols * 1 (separator/right border) = 1 + ncols*(width+3)
+    // We repeatedly shave one column from the widest until we fit, with a floor
+    // of 1 column per cell so every column remains at least minimally visible.
+    const size_t term_w = terminal_width();
+    auto table_w = [&]() -> size_t {
+        size_t w = 1; // left border
+        for (size_t c = 0; c < ncols; ++c) w += widths[c] + 3; // space + cell + space + separator
+        return w;
+    };
+    while (table_w() > term_w) {
+        // Find the widest column that still has room to shrink.
+        size_t worst = 0;
+        for (size_t c = 1; c < ncols; ++c)
+            if (widths[c] > widths[worst]) worst = c;
+        if (widths[worst] <= 1) break; // can't shrink any further
+        --widths[worst];
+    }
+
     // Helper: emit one row, padding each cell to its column width.
     auto emit_row = [&](const std::vector<std::string>& cells, bool is_header) {
         out += kDim;
@@ -299,17 +400,23 @@ void render_table(std::string& out,
         out += kReset;
         for (size_t c = 0; c < ncols; ++c) {
             const std::string& cell = c < cells.size() ? cells[c] : "";
-            std::string rendered = render_inline(cell);
+            // Clip the raw cell to the (possibly reduced) column width before
+            // rendering inline Markdown, so the ANSI sequences wrap the clipped text.
+            size_t clipped_w = 0;
+            std::string clipped = clip_cell(strip_inline_markers(cell), widths[c], clipped_w);
+            // Re-apply inline markup only if no clipping occurred (clipped content
+            // would have its markers split mid-span). When clipping is needed the
+            // plain stripped text with an ellipsis is clear enough.
+            std::string rendered = (clipped_w == display_width(strip_inline_markers(cell)))
+                ? render_inline(cell)
+                : clipped;
             if (is_header)
                 out += std::string(" ") + kBold + rendered + kReset;
             else
                 out += " " + rendered;
-            // Pad to column width. Must measure the same way widths[] was
-            // computed: strip Markdown markers first, then count display cols.
-            size_t raw_len = c < cells.size()
-                ? display_width(strip_inline_markers(cells[c])) : 0;
-            if (raw_len < widths[c])
-                out.append(widths[c] - raw_len, ' ');
+            // Pad to column width using the clipped visible width.
+            if (clipped_w < widths[c])
+                out.append(widths[c] - clipped_w, ' ');
             out += " ";
             out += kDim;
             out += "│";
