@@ -72,7 +72,7 @@ const char* kUsage =
     "\n"
     "Chat config keys: provider-type (claude|openai|gemini), api-key,\n"
     "  provider-url (optional), model (optional), max-output-tokens (optional),\n"
-    "  print-cot (optional, default true)\n"
+    "  max-tool-iterations (optional, default 200), print-cot (optional, default true)\n"
     "\n"
     "Scope flags:\n"
     "  --system   machine-wide config\n"
@@ -128,7 +128,7 @@ std::vector<EffectiveEntry> effective_config() {
 bool is_supported_config_key(const std::string& key) {
     static const char* kKeys[] = {
         "provider-type", "api-key", "provider-url", "model",
-        "max-output-tokens", "system-prompt", "trace-file", "print-cot",
+        "max-output-tokens", "max-tool-iterations", "system-prompt", "trace-file", "print-cot",
     };
     for (const char* k : kKeys) {
         if (key == k) return true;
@@ -144,7 +144,8 @@ int cmd_set(const Args& a) {
     if (!is_supported_config_key(a.positional[1])) {
         ui::print_error("unknown config key '" + a.positional[1] +
                         "'.\n  supported keys: provider-type, api-key, provider-url, "
-                        "model, max-output-tokens, system-prompt, trace-file, print-cot");
+                        "model, max-output-tokens, max-tool-iterations, system-prompt, "
+                        "trace-file, print-cot");
         return 2;
     }
     Level level = a.level.value_or(Level::Local);
@@ -480,6 +481,13 @@ int cmd_chat() {
             ai_config.setMaxOutputTokens(std::stoi(*v));
         } catch (const std::exception&) {
             ui::print_warning("invalid max-output-tokens '" + *v + "', using default");
+        }
+    }
+    if (auto v = get_effective("max-tool-iterations")) {
+        try {
+            ai_config.setMaxToolIterations(std::stoi(*v));
+        } catch (const std::exception&) {
+            ui::print_warning("invalid max-tool-iterations '" + *v + "', using default");
         }
     }
     if (auto v = get_effective("print-cot")) {

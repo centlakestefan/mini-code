@@ -632,7 +632,21 @@ void erase_status_line() {
 
 std::string iteration_prefix(int iteration, int max_iterations) {
     if (iteration <= 0) return "";
-    return "[" + std::to_string(iteration) + "/" + std::to_string(max_iterations) + "] ";
+
+    // Right-align the counter in a 3-char field: "[  1] ", "[ 42] ", "[100] ".
+    std::string num = std::to_string(iteration);
+    if (num.size() < 3) num = std::string(3 - num.size(), ' ') + num;
+
+    // Warn as the counter nears the cap: yellow at 80%, red at 95% (red wins).
+    const char* color = "";
+    if (max_iterations > 0) {
+        if (iteration >= max_iterations * 95 / 100)      color = kRed;
+        else if (iteration >= max_iterations * 80 / 100) color = kYellow;
+    }
+
+    if (*color)
+        return "[" + std::string(color) + num + kReset + "] ";
+    return "[" + num + "] ";
 }
 
 } // anonymous namespace
