@@ -312,6 +312,21 @@ std::string clip_cell(const std::string& raw, size_t max_cols, size_t& out_width
     const unsigned char* clip_at = p; // byte position where we must stop
     while (p < end) {
         unsigned char b = *p;
+        // Pass ANSI escape sequences through without counting visible width, and
+        // never clip in the middle of one (would leave a broken control code).
+        if (b == 0x1B) {
+            const unsigned char* q = p + 1;
+            if (q < end && *q == '[') {          // CSI: ESC [ params... final
+                ++q;
+                while (q < end && !(*q >= 0x40 && *q <= 0x7E)) ++q;
+                if (q < end) ++q;                // include the final byte
+            } else if (q < end) {
+                ++q;                             // lone ESC + one byte (rare)
+            }
+            clip_at = q;
+            p = q;
+            continue;
+        }
         int bytes = 1;
         uint32_t cp = 0;
         if      (b < 0x80)            { cp = b;        bytes = 1; }
@@ -658,9 +673,11 @@ std::string iteration_prefix(int iteration, int max_iterations) {
 void set_status(const std::string& text, int iteration, int max_iterations) {
     constexpr size_t kMaxWidth = 78;
 
-    g_status_text = iteration_prefix(iteration, max_iterations) + text;
-    if (g_status_text.size() > kMaxWidth)
-        g_status_text = g_status_text.substr(0, kMaxWidth - 3) + "...";
+    // clip_cell measures visible columns (UTF-8/wide-aware) and skips ANSI
+    // escapes, so the counter's color codes don't count toward the width.
+    size_t visible = 0;
+    g_status_text = clip_cell(iteration_prefix(iteration, max_iterations) + text,
+                              kMaxWidth, visible);
 
     if (!g_status_visible)
         std::cout << "\x1b[?25l"; // hide cursor while the status line is live
