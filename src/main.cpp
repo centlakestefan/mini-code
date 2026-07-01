@@ -446,6 +446,50 @@ bool first_run_setup() {
     return true;
 }
 
+// Read one logical prompt from stdin. Usually that's a single line, but when
+// bracketed paste is enabled most terminals wrap pasted text in ESC[200~ ...
+// ESC[201~ markers. std::getline stops at the first embedded newline, so a
+// multi-line paste would otherwise arrive one line per loop iteration. Detect
+// the start marker and keep reading until the end marker (which may land on a
+// later line), rejoining the pasted lines into a single prompt. Terminals that
+// don't support bracketed paste never send the markers, so behaviour is
+// unchanged. Returns false on EOF.
+bool read_user_input(std::string& out) {
+    static const std::string kPasteStart = "\x1b[200~";
+    static const std::string kPasteEnd   = "\x1b[201~";
+
+    std::string line;
+    if (!std::getline(std::cin, line)) return false;
+
+    size_t start = line.find(kPasteStart);
+    if (start != std::string::npos) {
+        // Drop the start marker (keeping any text typed before it), then keep
+        // reading until the end marker appears.
+        line.erase(start, kPasteStart.size());
+        while (line.find(kPasteEnd) == std::string::npos) {
+            std::string more;
+            if (!std::getline(std::cin, more)) break; // EOF mid-paste: use what we have
+            line += '\n';
+            line += more;
+        }
+        size_t end = line.find(kPasteEnd);
+        if (end != std::string::npos) line.erase(end, kPasteEnd.size());
+    }
+
+    // Normalize CR / CRLF that some terminals use as paste line separators.
+    out.clear();
+    out.reserve(line.size());
+    for (size_t i = 0; i < line.size(); ++i) {
+        if (line[i] == '\r') {
+            if (i + 1 < line.size() && line[i + 1] == '\n') continue; // CRLF -> LF
+            out += '\n';                                              // lone CR -> LF
+        } else {
+            out += line[i];
+        }
+    }
+    return true;
+}
+
 int cmd_chat() {
     if (auto tf = get_effective("trace-file")) mclog_set_file(*tf);
 
@@ -517,10 +561,11 @@ int cmd_chat() {
     context.tools = builtin_tools();
 
     ui::print_banner(TAPTO_CODE_VERSION, *provider, model);
+    std::cout << "\x1b[?2004h" << std::flush; // enable bracketed paste (multi-line input)
     std::string line;
     while (true) {
         ui::print_prompt("\x1b[?25h> "); // ensure cursor is visible at the prompt
-        if (!std::getline(std::cin, line)) {
+        if (!read_user_input(line)) {
             ui::print_line(""); // move past the prompt on EOF (Ctrl-D / Ctrl-Z)
             break;
         }
@@ -586,6 +631,7 @@ int cmd_chat() {
             ui::print_error(e.what());
         }
     }
+    std::cout << "\x1b[?2004l" << std::flush; // disable bracketed paste on exit
     return 0;
 }
 
