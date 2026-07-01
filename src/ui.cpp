@@ -3,6 +3,7 @@
 
 #include "tapto/ui.h"
 
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <vector>
