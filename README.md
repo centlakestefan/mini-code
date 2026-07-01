@@ -146,9 +146,9 @@ directory tapto-code is launched from):
   an explicit JSON schema for OpenAI/Gemini.
 - **`find_files`** — find files by wildcard pattern (`*`, `?`), optionally
   grepping their contents.
-- **`list_commands`** — list the allow-listed commands (see below).
-- **`run_command`** — run one allow-listed command by name and return its
-  output and exit code.
+- **`list_commands`** — list the built-in and allow-listed commands (see below).
+- **`run_command`** — run one built-in or allow-listed command by name and
+  return its output.
 
 These edit real files on disk. `create` refuses to overwrite an existing file;
 `str_replace` requires the target string to be unique.
@@ -159,10 +159,31 @@ that resolve outside that subtree — via `..`, an absolute path, or a symlink �
 are rejected. (`run_command` is governed separately: it can only run the
 commands you explicitly allow-list, so its reach is whatever you configure.)
 
-## Commands (allow-list)
+## Commands
 
-`run_command` is **not** a general shell — the agent can only run commands you
-have explicitly allow-listed. Commands are stored per scope (system / global /
+### Built-in commands (always available)
+
+`run_command` ships a small set of read-only, cross-platform utilities
+implemented in-process (no shell), so they work everywhere — including on pure
+Windows, where these don't otherwise exist. They resolve paths inside the
+sandbox and never shell out:
+
+| Command | Purpose |
+| ------- | ------- |
+| `wc [-l\|-w\|-c] <file>` | count lines / words / bytes (all three with no flag) |
+| `head [-n N] <file>`     | first N lines (default 10) |
+| `tail [-n N] <file>`     | last N lines (default 10) |
+| `cat <file>`             | print a file's contents |
+| `ls [path]`              | list a directory (default `.`) |
+| `tree [path] [-L depth]` | show a directory tree (skips `.git`, `build`, `node_modules`, …) |
+
+These names are reserved — they take precedence over allow-listed commands and
+can't be redefined with `command add`.
+
+### Allow-listed commands
+
+`run_command` is **not** a general shell — beyond the built-ins above, the agent
+can only run commands you have explicitly allow-listed. Commands are stored per scope (system / global /
 local, same precedence as config); local commands live in the central
 per-folder store (not in the repo), so a cloned project can't ship runnable
 commands. Managed with:

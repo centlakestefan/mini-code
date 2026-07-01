@@ -7,6 +7,7 @@
 #include "tapto/context.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -690,16 +691,273 @@ std::string exec_capture(const std::vector<std::string>& argv, int& exit_code) {
 }
 #endif
 
+// --- built-in virtual commands --------------------------------------------
+//
+// A small, fixed set of read-only shell-style utilities implemented in C++ so
+// they behave identically on every platform — in particular they work on pure
+// Windows, where wc/head/tail/etc. are absent. They resolve paths inside the
+// sandbox and never shell out. The names are reserved: run_command dispatches
+// to these before consulting the user allow-list.
+
+constexpr size_t kBuiltinMaxBytes = 64000;
+
+// Real content lines: split on '\n' and drop the synthetic trailing empty
+// segment split_lines yields when the file ends with a newline.
+std::vector<std::string> content_lines(const std::string& content) {
+    if (content.empty()) return {};
+    auto lines = split_lines(content);
+    if (content.back() == '\n' && !lines.empty() && lines.back().empty())
+        lines.pop_back();
+    return lines;
+}
+
+std::string cap_output(std::string s) {
+    if (s.size() > kBuiltinMaxBytes)
+        s = s.substr(0, kBuiltinMaxBytes) + "\n... [output truncated]";
+    return s;
+}
+
+std::string builtin_wc(const std::vector<std::string>& args) {
+    bool l = false, w = false, c = false;
+    std::string file;
+    for (const auto& a : args) {
+        if (a == "-l") l = true;
+        else if (a == "-w") w = true;
+        else if (a == "-c") c = true;
+        else if (!a.empty() && a[0] == '-') return "ERROR: wc: unknown flag '" + a + "' (use -l, -w, -c)";
+        else if (file.empty()) file = a;
+        else return "ERROR: wc: only one file is supported";
+    }
+    if (file.empty()) return "ERROR: wc: missing file operand";
+    fs::path p;
+    std::string err;
+    if (!resolve_in_sandbox(file, p, err)) return err;
+    std::string content;
+    if (!read_file(p, content)) return "ERROR: wc: cannot read " + file;
+
+    size_t lines = 0, words = 0, bytes = content.size();
+    bool in_word = false;
+    for (char ch : content) {
+        if (ch == '\n') ++lines;
+        bool sp = (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v');
+        if (!sp && !in_word) { in_word = true; ++words; }
+        else if (sp) in_word = false;
+    }
+
+    bool none = !l && !w && !c;
+    std::ostringstream out;
+    if (none || l) out << lines << " ";
+    if (none || w) out << words << " ";
+    if (none || c) out << bytes << " ";
+    out << file;
+    return out.str();
+}
+
+// Parse the leading count for head/tail from "-n N", "-nN", or "-N".
+// Returns "" on success (filling n/file), or an error string.
+std::string parse_head_tail(const std::vector<std::string>& args, size_t& n, std::string& file) {
+    n = 10;
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        auto to_count = [&](const std::string& digits) -> bool {
+            try { long v = std::stol(digits); n = v < 0 ? 0 : static_cast<size_t>(v); return true; }
+            catch (const std::exception&) { return false; }
+        };
+        if (a == "-n") {
+            if (i + 1 >= args.size()) return "ERROR: -n requires a number";
+            if (!to_count(args[++i])) return "ERROR: -n: invalid number '" + args[i] + "'";
+        } else if (a.rfind("-n", 0) == 0 && a.size() > 2) {
+            if (!to_count(a.substr(2))) return "ERROR: -n: invalid number in '" + a + "'";
+        } else if (a.size() > 1 && a[0] == '-' && std::isdigit(static_cast<unsigned char>(a[1]))) {
+            if (!to_count(a.substr(1))) return "ERROR: invalid count '" + a + "'";
+        } else if (!a.empty() && a[0] == '-') {
+            return "ERROR: unknown flag '" + a + "' (use -n N)";
+        } else if (file.empty()) {
+            file = a;
+        } else {
+            return "ERROR: only one file is supported";
+        }
+    }
+    if (file.empty()) return "ERROR: missing file operand";
+    return "";
+}
+
+std::string builtin_head_tail(bool head, const std::vector<std::string>& args) {
+    size_t n = 10;
+    std::string file;
+    std::string perr = parse_head_tail(args, n, file);
+    if (!perr.empty()) return perr + (head ? " (head)" : " (tail)");
+    fs::path p;
+    std::string err;
+    if (!resolve_in_sandbox(file, p, err)) return err;
+    std::string content;
+    if (!read_file(p, content)) return "ERROR: cannot read " + file;
+
+    auto lines = content_lines(content);
+    std::ostringstream out;
+    if (head) {
+        for (size_t i = 0; i < lines.size() && i < n; ++i) out << lines[i] << "\n";
+    } else {
+        size_t start = lines.size() > n ? lines.size() - n : 0;
+        for (size_t i = start; i < lines.size(); ++i) out << lines[i] << "\n";
+    }
+    return cap_output(out.str());
+}
+
+std::string builtin_cat(const std::vector<std::string>& args) {
+    std::string file;
+    for (const auto& a : args) {
+        if (!a.empty() && a[0] == '-') return "ERROR: cat: unknown flag '" + a + "'";
+        else if (file.empty()) file = a;
+        else return "ERROR: cat: only one file is supported";
+    }
+    if (file.empty()) return "ERROR: cat: missing file operand";
+    fs::path p;
+    std::string err;
+    if (!resolve_in_sandbox(file, p, err)) return err;
+    std::error_code ec;
+    if (fs::is_directory(p, ec)) return "ERROR: cat: " + file + " is a directory";
+    std::string content;
+    if (!read_file(p, content)) return "ERROR: cat: cannot read " + file;
+    if (content.size() > kBuiltinMaxBytes)
+        content = content.substr(0, kBuiltinMaxBytes) +
+                  "\n... [truncated; use the editor 'view' command with view_range for more]";
+    return content;
+}
+
+std::string builtin_ls(const std::vector<std::string>& args) {
+    std::string path = ".";
+    bool have_path = false;
+    for (const auto& a : args) {
+        if (!a.empty() && a[0] == '-') return "ERROR: ls: unknown flag '" + a + "'";
+        else if (!have_path) { path = a; have_path = true; }
+        else return "ERROR: ls: only one path is supported";
+    }
+    fs::path p;
+    std::string err;
+    if (!resolve_in_sandbox(path, p, err)) return err;
+    std::error_code ec;
+    if (!fs::exists(p, ec)) return "ERROR: ls: path not found: " + path;
+    if (!fs::is_directory(p, ec)) return p.filename().string() + "\n"; // a plain file
+
+    std::vector<std::string> entries;
+    for (const auto& e : fs::directory_iterator(p, ec)) {
+        std::string name = e.path().filename().string();
+        if (e.is_directory(ec)) name += "/";
+        entries.push_back(name);
+    }
+    std::sort(entries.begin(), entries.end());
+    std::ostringstream out;
+    for (const auto& name : entries) out << name << "\n";
+    return cap_output(out.str());
+}
+
+// Box-drawing connectors for tree output.
+constexpr const char* kTreeTee = "\xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 "; // "├── "
+constexpr const char* kTreeEnd = "\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80 "; // "└── "
+constexpr const char* kTreeBar = "\xe2\x94\x82   ";                       // "│   "
+constexpr const char* kTreeGap = "    ";
+
+void tree_walk(const fs::path& dir, const std::string& prefix, int depth_left,
+               size_t& count, size_t max_count, std::ostream& out, bool& truncated) {
+    std::error_code ec;
+    std::vector<fs::directory_entry> entries;
+    for (const auto& e : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied, ec))
+        entries.push_back(e);
+    std::sort(entries.begin(), entries.end(),
+              [](const fs::directory_entry& a, const fs::directory_entry& b) {
+                  return a.path().filename().string() < b.path().filename().string();
+              });
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (count >= max_count) { truncated = true; return; }
+        const auto& e = entries[i];
+        std::error_code dec;
+        bool is_dir = e.is_directory(dec);
+        std::string name = e.path().filename().string();
+        bool last = (i + 1 == entries.size());
+        out << prefix << (last ? kTreeEnd : kTreeTee) << name << (is_dir ? "/" : "") << "\n";
+        ++count;
+        if (is_dir && !is_noise_dir(name) && depth_left > 1) {
+            tree_walk(e.path(), prefix + (last ? kTreeGap : kTreeBar),
+                      depth_left - 1, count, max_count, out, truncated);
+            if (truncated) return;
+        }
+    }
+}
+
+std::string builtin_tree(const std::vector<std::string>& args) {
+    std::string path;
+    bool have_path = false;
+    int depth = 1000000; // effectively unlimited unless -L is given
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        auto to_depth = [&](const std::string& digits) -> bool {
+            try { int v = std::stoi(digits); depth = v < 1 ? 1 : v; return true; }
+            catch (const std::exception&) { return false; }
+        };
+        if (a == "-L") {
+            if (i + 1 >= args.size()) return "ERROR: tree: -L requires a number";
+            if (!to_depth(args[++i])) return "ERROR: tree: invalid -L value '" + args[i] + "'";
+        } else if (a.rfind("-L", 0) == 0 && a.size() > 2) {
+            if (!to_depth(a.substr(2))) return "ERROR: tree: invalid -L value in '" + a + "'";
+        } else if (!a.empty() && a[0] == '-') {
+            return "ERROR: tree: unknown flag '" + a + "' (use -L depth)";
+        } else if (!have_path) {
+            path = a; have_path = true;
+        } else {
+            return "ERROR: tree: only one path is supported";
+        }
+    }
+    if (!have_path) path = ".";
+    fs::path p;
+    std::string err;
+    if (!resolve_in_sandbox(path, p, err)) return err;
+    std::error_code ec;
+    if (!fs::exists(p, ec)) return "ERROR: tree: path not found: " + path;
+    if (!fs::is_directory(p, ec)) return path + "\n";
+
+    constexpr size_t kMaxTreeEntries = 300;
+    std::ostringstream out;
+    out << path << "\n";
+    size_t count = 0;
+    bool truncated = false;
+    tree_walk(p, "", depth, count, kMaxTreeEntries, out, truncated);
+    if (truncated)
+        out << "... [truncated at " << kMaxTreeEntries
+            << " entries; narrow with a path or -L depth]\n";
+    return cap_output(out.str());
+}
+
+std::string run_builtin_command(const std::string& name, const std::vector<std::string>& args) {
+    if (name == "wc")   return builtin_wc(args);
+    if (name == "head") return builtin_head_tail(true, args);
+    if (name == "tail") return builtin_head_tail(false, args);
+    if (name == "cat")  return builtin_cat(args);
+    if (name == "ls")   return builtin_ls(args);
+    if (name == "tree") return builtin_tree(args);
+    return "ERROR: unknown built-in command '" + name + "'";
+}
+
 std::string execute_list_commands(Context& /*context*/, const json& /*in*/) {
+    std::ostringstream out;
+    out << "Built-in commands (always available, cross-platform):\n"
+           "- wc [-l|-w|-c] <file>: count lines/words/bytes\n"
+           "- head [-n N] <file>: first N lines (default 10)\n"
+           "- tail [-n N] <file>: last N lines (default 10)\n"
+           "- cat <file>: print a file's contents\n"
+           "- ls [path]: list a directory\n"
+           "- tree [path] [-L depth]: show a directory tree\n";
+
     auto cmds = merged_commands();
     if (cmds.empty()) {
-        return "No commands are configured. The user can add them with: "
-               "tapto-code command add <name> <command...>";
-    }
-    std::ostringstream out;
-    out << "Available commands:\n";
-    for (const auto& [name, cmdline] : cmds) {
-        out << "- " << name << ": " << cmdline << "\n";
+        out << "\nNo user commands are configured. The user can add them with: "
+               "tapto-code command add <name> <command...>\n";
+    } else {
+        out << "\nUser commands:\n";
+        for (const auto& [name, cmdline] : cmds) {
+            out << "- " << name << ": " << cmdline << "\n";
+        }
     }
     return out.str();
 }
@@ -708,6 +966,19 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
     try {
         if (!in.contains("name")) return "ERROR: 'name' not present.";
         std::string name = in["name"].get<std::string>();
+
+        std::vector<std::string> args;
+        if (in.contains("args")) {
+            if (!in["args"].is_array()) return "ERROR: 'args' must be an array of strings.";
+            for (const auto& a : in["args"]) {
+                args.push_back(a.is_string() ? a.get<std::string>() : a.dump());
+            }
+        }
+
+        // Built-in cross-platform commands are reserved names and take
+        // precedence over the user allow-list, so they behave the same on
+        // every OS (and work on pure Windows where wc/head/etc. are absent).
+        if (is_builtin_command(name)) return run_builtin_command(name, args);
 
         auto cmds = merged_commands();
         auto it = cmds.find(name);
@@ -719,14 +990,6 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
             return msg;
         }
         const std::string& tpl = it->second;
-
-        std::vector<std::string> args;
-        if (in.contains("args")) {
-            if (!in["args"].is_array()) return "ERROR: 'args' must be an array of strings.";
-            for (const auto& a : in["args"]) {
-                args.push_back(a.is_string() ? a.get<std::string>() : a.dump());
-            }
-        }
 
         int exit_code = 0;
         std::string output;
@@ -759,6 +1022,11 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
 }
 
 } // namespace
+
+bool is_builtin_command(const std::string& name) {
+    return name == "wc" || name == "head" || name == "tail" ||
+           name == "cat" || name == "ls" || name == "tree";
+}
 
 std::vector<ToolSpec> builtin_tools() {
     std::vector<ToolSpec> tools;
@@ -831,22 +1099,24 @@ std::vector<ToolSpec> builtin_tools() {
     ToolSpec run;
     run.name = "run_command";
     run.description =
-        "Run one of the project's pre-approved commands by name. Arbitrary shell "
-        "commands are NOT allowed; only commands configured via "
-        "'tapto-code command add' can be run. Call list_commands first to see what "
-        "is available, including any %1, %2, ... placeholders a command takes. "
-        "Provide values for those placeholders via 'args' (in order; %* receives "
-        "all remaining values). A %p1-style placeholder is a path argument that "
-        "must stay inside the working directory. Returns the command's combined "
-        "output and exit code.";
+        "Run a command by name. Two kinds are available (call list_commands to see "
+        "them): (1) built-in cross-platform utilities that always work, including on "
+        "Windows: wc [-l|-w|-c] <file>, head [-n N] <file>, tail [-n N] <file>, "
+        "cat <file>, ls [path], tree [path] [-L depth]; and (2) the project's "
+        "pre-approved commands configured via 'tapto-code command add'. Arbitrary "
+        "shell commands are NOT allowed. Pass a command's arguments via 'args' (in "
+        "order). For configured commands with %1, %2, ... placeholders, args fill "
+        "them (%* receives all remaining values); a %p1-style placeholder is a path "
+        "argument that must stay inside the working directory. Returns the command's "
+        "output.";
     run.parameters = {
         {"type", "object"},
         {"properties", {
-            {"name", {{"type", "string"}, {"description", "Name of the configured command to run."}}},
+            {"name", {{"type", "string"}, {"description", "Name of the built-in or configured command to run."}}},
             {"args", {
                 {"type", "array"},
                 {"items", {{"type", "string"}}},
-                {"description", "Values for the command's %1, %2, ... placeholders, in order."}
+                {"description", "Arguments for the command (built-in flags/paths, or values for %1, %2, ... placeholders), in order."}
             }},
         }},
         {"required", {"name"}},

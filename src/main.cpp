@@ -270,6 +270,10 @@ int cmd_command(std::optional<Level> level, const std::vector<std::string>& rest
             ui::print_error("command name must not contain spaces or '='");
             return 2;
         }
+        if (tapto::is_builtin_command(name)) {
+            ui::print_error("'" + name + "' is a reserved built-in command and can't be redefined");
+            return 2;
+        }
         std::string cmdline;
         for (size_t i = 2; i < rest.size(); ++i) {
             if (i > 2) cmdline += ' ';
@@ -611,6 +615,10 @@ int cmd_chat() {
             }
             if (name.find('=') != std::string::npos) {
                 ui::print_line("error: command name must not contain '='");
+                continue;
+            }
+            if (tapto::is_builtin_command(name)) {
+                ui::print_line("error: '" + name + "' is a reserved built-in command");
                 continue;
             }
             std::string cmdline = remainder.substr(begin);
